@@ -1,10 +1,8 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod analytics;
 mod ui;
-use analytics::{requests::ExecAgg, server::init_connection};
+use analytics::{requests::ExecAgg, server::Server, reports::DefaultWriter};
 use ui::app::render_app;
 
 #[tokio::main]
@@ -26,11 +24,12 @@ async fn main() -> std::io::Result<()> {
         9001.to_string()
     });
 
-    let exec_agg = Arc::new(RwLock::new(ExecAgg::default()));
-
+    let report_writer = DefaultWriter::new(10);
+    let server: Server = Server::new(host, port.parse().unwrap());
     debug!("Initialized with empty aggregation data");
 
-    init_connection(&host, &port, &exec_agg).await;
-    render_app(exec_agg)
+    let exec_agg_ref = server.exec_agg.clone();
+    server.init_connection(report_writer).await;
+    render_app(exec_agg_ref)
 }
 
