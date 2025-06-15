@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Text},
     widgets::{Block, Paragraph, Widget},
 };
+use std::fmt::Display;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use tracing::{debug, error, info, trace};
@@ -15,17 +16,61 @@ use crate::ExecAgg;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct App {
+    pages: Vec<Page>,
+    current_page: usize,
     exit: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            pages: vec![
+                Page::First((MetricType::TotalExecTime, MetricType::TotalMemoryUsage)),
+                Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage)),
+            ],
+            current_page: 0,
+            exit: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct Chart {
     exec_agg: ExecAgg,
+    metric_type: MetricType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+enum Page {
+    First((MetricType, MetricType)),
+    Second((MetricType, MetricType)),
+}
+
+#[derive(Debug, Default, Clone)]
+enum MetricType {
+    #[default]
+    TotalExecTime,
+    TotalMemoryUsage,
+    TotalExecCount,
+    TimeAverage,
+}
+
+impl Display for MetricType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let val = match self {
+            MetricType::TotalExecTime => "Total Execution Time (ms)",
+            MetricType::TotalMemoryUsage => "Total Memory Usage (mb)",
+            MetricType::TotalExecCount => "Total executions",
+            MetricType::TimeAverage => "Average Time Per Execution (ms)",
+        };
+
+        write!(f, "{}", val)
+    }
+}
+
+#[derive(Debug, Default)]
 struct ChartWidget(Arc<RwLock<Chart>>);
 
 impl Widget for ChartWidget {
@@ -33,7 +78,10 @@ impl Widget for ChartWidget {
     where
         Self: Sized,
     {
-        let title = Line::from("Time (ms)").bold();
+        let title = match self.0.try_read() {
+            Ok(chart) => Line::from(format!("{}", chart.metric_type)).bold(),
+            Err(_) => Line::from("Chart (Loading...)").bold(),
+        };
         let block = Block::bordered()
             .title(title.centered())
             .border_set(border::ROUNDED);
@@ -66,7 +114,7 @@ impl Widget for ChartWidget {
 
         // Label for the x-axis
         Paragraph::new(Text::from(vec![Line::from(
-            "ELAPSED TIME (MS)".to_string().yellow(),
+            "Applications".to_string().yellow(),
         )]))
         .centered()
         .render(inner_layout[1], buf);
@@ -89,7 +137,17 @@ impl Widget for ChartWidget {
             let max_time = data
                 .exec_data
                 .values()
-                .map(|d| d.total_exec_time)
+                .map(|d| {
+                    match self.0.try_read() {
+                        Ok(chart) => match chart.metric_type {
+                            MetricType::TotalExecTime => d.total_exec_time,
+                            MetricType::TotalMemoryUsage => d.total_memory_usage,
+                            MetricType::TotalExecCount => d.total_execs as f32,
+                            MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
+                        },
+                        Err(_) => 0.0, // Default value when lock can't be acquired
+                    }
+                })
                 .fold(0.0, f32::max);
 
             // Calculate appropriate bar width to use full space
@@ -98,10 +156,19 @@ impl Widget for ChartWidget {
             let mut map = HashMap::new();
 
             for (i, d) in data.exec_data.values().enumerate() {
+                let val = match self.0.try_read() {
+                    Ok(chart) => match chart.metric_type {
+                        MetricType::TotalExecTime => d.total_exec_time,
+                        MetricType::TotalMemoryUsage => d.total_memory_usage,
+                        MetricType::TotalExecCount => d.total_execs as f32,
+                        MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
+                    },
+                    Err(_) => 0.0, // Default value when lock can't be acquired
+                };
+
                 // Calculate scaled height - use 80% of available height for max value
-                let height = ((d.total_exec_time as f64 / max_time as f64)
-                    * inner_layout[0].height as f64
-                    * 0.8) as u16;
+                let height =
+                    ((val as f64 / max_time as f64) * inner_layout[0].height as f64 * 0.8) as u16;
                 // Ensure minimum visible height
                 let height = std::cmp::max(height, 1);
 
@@ -112,10 +179,10 @@ impl Widget for ChartWidget {
                 // bars properly
                 let x = inner_layout[0].x + (i as u16 * bar_width) + gap;
 
-                debug!(%d.total_exec_time, "Capturing");
+                debug!(%val, "Capturing");
 
                 map.insert(
-                    (d.name.clone(), (d.total_exec_time * 100.0).round() as u32),
+                    (d.name.clone(), (val * 100.0).round() as u32),
                     Rect::new(x, inner_layout[0].y + y, bar_width, height),
                 );
             }
@@ -143,9 +210,18 @@ impl Widget for ChartWidget {
                     },
                 );
                 if safe_width > 0 {
-                    lines.push(
-                        Line::from(format!(" {} ", "█".repeat(safe_width)).yellow()).centered(),
-                    );
+                    let text = "█".repeat(safe_width);
+                    let text = match self.0.try_read() {
+                        Ok(chart) => match chart.metric_type {
+                            MetricType::TotalExecCount | MetricType::TotalMemoryUsage => {
+                                text.yellow()
+                            }
+                            MetricType::TotalExecTime | MetricType::TimeAverage => text.blue(),
+                        },
+                        Err(_) => text.yellow(),
+                    };
+                    let line = Line::from(vec![" ".into(), text, " ".into()]);
+                    lines.push(line.centered());
                 }
             }
 
@@ -158,7 +234,11 @@ impl Widget for ChartWidget {
 
             // If text is bigger than max, break line
             if name_clone.len() > max_width.into() {
-                let last_line = name_clone.get(max_width as usize + 1..).unwrap_or("");
+                let mut last_line = name_clone
+                    .get(max_width as usize..)
+                    .unwrap_or("")
+                    .to_string();
+                last_line.truncate(max_width.into());
                 let name_rect = Rect::new(bar.x, bar.y + bar.height + 1, bar.width, 1);
                 Paragraph::new(Line::from(last_line).red().centered()).render(name_rect, buf);
             }
@@ -183,6 +263,20 @@ impl Widget for ChartWidget {
 }
 
 impl Chart {
+    fn new(metric_type: MetricType, exec_agg: Option<Arc<RwLock<ExecAgg>>>) -> Self {
+        if let Some(exec_agg) = exec_agg {
+            Self {
+                exec_agg: exec_agg.try_read().unwrap().clone(), // Unwrap because app is initializing
+                metric_type,
+            }
+        } else {
+            Self {
+                exec_agg: ExecAgg::default(),
+                metric_type,
+            }
+        }
+    }
+
     fn start_periodic_updates(chart: Arc<RwLock<Self>>, exec_agg: Arc<RwLock<ExecAgg>>) {
         tokio::spawn(async move {
             loop {
@@ -218,9 +312,39 @@ impl App {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame, &chart1_ref, &chart2_ref))?;
             self.handle_events()?;
+            self.handle_pages(&chart1_ref, &chart2_ref);
         }
 
         Ok(())
+    }
+
+    fn handle_pages(&self, chart1: &Arc<RwLock<Chart>>, chart2: &Arc<RwLock<Chart>>) {
+        // Get the current page configuration
+        if let Some(page) = self.pages.get(self.current_page).cloned() {
+            // Clone the Arc references to extend their lifetime
+            let chart1 = chart1.clone();
+            let chart2 = chart2.clone();
+
+            // Update chart metrics based on the current page
+            tokio::spawn(async move {
+                match page {
+                    Page::First((metric1, metric2)) => {
+                        let mut c1 = chart1.write().await;
+                        c1.metric_type = metric1.clone();
+
+                        let mut c2 = chart2.write().await;
+                        c2.metric_type = metric2.clone();
+                    }
+                    Page::Second((metric1, metric2)) => {
+                        let mut c1 = chart1.write().await;
+                        c1.metric_type = metric1.clone();
+
+                        let mut c2 = chart2.write().await;
+                        c2.metric_type = metric2.clone();
+                    }
+                }
+            });
+        }
     }
 
     fn draw(&self, frame: &mut Frame, chart1: &Arc<RwLock<Chart>>, chart2: &Arc<RwLock<Chart>>) {
@@ -253,9 +377,30 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
+            KeyCode::Left | KeyCode::Char('h') => self.change_page(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.change_page(1),
             _ => {}
         }
     }
+
+    fn change_page(&mut self, offset: i16) {
+        // Early return if trying to go beyond boundaries
+        if (offset < 0 && self.current_page == 0)
+            || (offset > 0 && self.current_page >= self.pages.len().saturating_sub(1))
+        {
+            return;
+        }
+
+        // Handle negative and positive offsets safely
+        if offset < 0 {
+            self.current_page = self.current_page.saturating_sub(-offset as usize);
+        } else {
+            self.current_page = self.current_page.saturating_add(offset as usize);
+        }
+
+        debug!("Changed to page {}", self.current_page);
+    }
+
     fn exit(&mut self) {
         self.exit = true
     }
@@ -264,8 +409,8 @@ impl App {
 pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     trace!("Rendering app");
 
-    let chart1 = Arc::new(RwLock::new(Chart::default()));
-    let chart2 = Arc::new(RwLock::new(Chart::default()));
+    let chart1 = Arc::new(RwLock::new(Chart::new(MetricType::TotalExecTime, None)));
+    let chart2 = Arc::new(RwLock::new(Chart::new(MetricType::TotalExecCount, None)));
 
     Chart::start_periodic_updates(chart1.clone(), exec_agg.clone());
     Chart::start_periodic_updates(chart2.clone(), exec_agg);
