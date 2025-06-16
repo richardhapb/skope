@@ -175,7 +175,7 @@ impl Widget for ChartWidget {
                 // Position at bottom of chart area
                 let y = inner_layout[0].height.saturating_sub(height + 3); // 3 = Keep space for labels
 
-                // X position with proper offset from inner_layout, gap * 2 allows centering the
+                // X position with proper offset from inner_layout, gap allows centering the
                 // bars properly
                 let x = inner_layout[0].x + (i as u16 * bar_width) + gap;
 
@@ -183,12 +183,13 @@ impl Widget for ChartWidget {
 
                 map.insert(
                     (d.name.clone(), (val * 100.0).round() as u32),
-                    Rect::new(x, inner_layout[0].y + y, bar_width, height),
+                    Rect::new(x, inner_layout[0].y + y, bar_width - gap, height),
                 );
             }
             map
         };
 
+        // Rendering the charts and its labels
         for (values, bar) in bars {
             debug!(
                 "Rendering bar at x={}, y={}, width={}, height={}",
@@ -229,22 +230,21 @@ impl Widget for ChartWidget {
 
             debug!(?values, "Rendering values");
 
-            let max_width = bar.width - 2;
             let mut name_clone = values.0.clone();
 
             // If text is bigger than max, break line
-            if name_clone.len() > max_width.into() {
+            if name_clone.len() > bar.width.into() {
                 let mut last_line = name_clone
-                    .get(max_width as usize..)
+                    .get(bar.width as usize..)
                     .unwrap_or("")
                     .to_string();
-                last_line.truncate(max_width.into());
+                last_line.truncate(bar.width.into());
                 let name_rect = Rect::new(bar.x, bar.y + bar.height + 1, bar.width, 1);
                 Paragraph::new(Line::from(last_line).red().centered()).render(name_rect, buf);
             }
 
             // Print the line below or single line
-            name_clone.truncate(max_width.into());
+            name_clone.truncate(bar.width.into());
             let name_rect = Rect::new(bar.x, bar.y + bar.height, bar.width, 1);
             Paragraph::new(Line::from(name_clone).red().centered()).render(name_rect, buf);
 
