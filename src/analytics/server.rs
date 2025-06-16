@@ -3,9 +3,10 @@ use super::requests::{AggData, ExecAgg, ExecData};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
 #[derive(Default, Debug, Clone)]
@@ -14,7 +15,7 @@ pub struct Server {
     pub port: u16,
     pub exec_agg: Arc<RwLock<ExecAgg>>,
     pub exec_data: Arc<RwLock<Vec<ExecData>>>,
-    iteration: Arc<Mutex<usize>>,
+    iteration: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -94,15 +95,15 @@ impl Server {
         let n_exec_ref_inner = self.iteration.clone();
 
         // Use a timeout for read operations
-        let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
+        let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
         tokio::pin!(idle_timeout);
 
         loop {
             tokio::select! {
-                _ = &mut idle_timeout => {
-                    debug!(%addr, "Connection idle timeout");
-                    return Ok(());
-                }
+            _ = &mut idle_timeout => {
+                debug!(%addr, "Connection idle timeout");
+                return Ok(());
+            }
                 read_result = socket.read(&mut buf) => {
                     match read_result {
                         Ok(0) => {
@@ -120,30 +121,26 @@ impl Server {
                                     info!(?parsed);
                                     self.process_data(parsed).await?;
 
-                            let mut counter = n_exec_ref_inner.lock().await;
-                            *counter += 1;
+                                    let counter = n_exec_ref_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-                            let should_generate_report =
-                                *counter == report_writer.get_iterations_threshold();
-                            // IMPORTANT: Drop the lock as soon as you're done with it to avoid deadlocks
-                            // and allow other tasks to acquire the lock.
-                            drop(counter);
+                                    let should_generate_report =
+                                    counter + 1 == report_writer.get_iterations_threshold();
 
-                            let exec_data_clone = self.exec_data.read().await.clone();
-                            let exec_agg_clone = self.exec_data.read().await.clone();
+                                    let exec_data_clone = self.exec_data.read().await.clone();
+                                    let exec_agg_clone = self.exec_agg.read().await.clone();
 
-                            if should_generate_report {
-                                let reportables: Vec<Box<dyn Reportable>> =
-                                    vec![Box::new(exec_data_clone), Box::new(exec_agg_clone)];
+                                    if should_generate_report {
+                                        let reportables: Vec<Box<dyn Reportable>> =
+                                        vec![Box::new(exec_data_clone), Box::new(exec_agg_clone)];
 
-                                let report_writer_inner = report_writer.clone();
+                                        let report_writer_inner = report_writer.clone();
 
-                                tokio::task::spawn_blocking(move || {
-                                    if let Err(e) = report_writer_inner.write_reports(reportables) {
-                                        error!(%e, "Error writing reports")
+                                        tokio::task::spawn_blocking(move || {
+                                            if let Err(e) = report_writer_inner.write_reports(reportables) {
+                                                error!(%e, "Error writing reports")
+                                            }
+                                        });
                                     }
-                                });
-                            }
 
                                 }
                                 Err(e) => {
@@ -215,7 +212,7 @@ mod tests {
     #[derive(Clone)]
     struct MockReportWriter {
         iterations_threshold: usize,
-        generated_flag: Arc<AtomicBool>, // Use Arc<AtomicBool> directly
+        generated_flag: Arc<AtomicBool>,
     }
 
     impl ReportWriter for MockReportWriter {
@@ -238,9 +235,9 @@ mod tests {
             let flag = Arc::new(AtomicBool::new(false));
             let writer = Self {
                 iterations_threshold: 10,
-                generated_flag: Arc::clone(&flag), // Clone the Arc for the writer
+                generated_flag: Arc::clone(&flag),
             };
-            (writer, flag) // Return the writer and the original Arc for testing
+            (writer, flag)
         }
     }
 
@@ -257,6 +254,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Test that the report generation threshold is working properly
+    // for example, if the threshold is defined as 10, after 10 requests
+    // the report should be generated.
     async fn test_generate_report() {
         let (report_writer_mock, generated_flag) = MockReportWriter::new();
         let test_server_port = find_available_port();
@@ -270,7 +270,7 @@ mod tests {
         // Give server time to start
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Use a timeout for the entire test
+        // Timeout for the entire test
         let test_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let mut client = Client::new("127.0.0.1", test_server_port);
             let app_data_for_json = AppData::new();
@@ -282,6 +282,11 @@ mod tests {
                 let json_data = serde_json::to_string(&exec_data_to_send)?;
                 client.stream.write_all(json_data.as_bytes())?;
                 client.stream.flush()?;
+
+                assert!(
+                    !generated_flag.load(Ordering::SeqCst),
+                    "Report generated early"
+                );
 
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -298,6 +303,48 @@ mod tests {
         assert!(
             generated_flag.load(Ordering::SeqCst),
             "Report was not generated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_data() {
+        let test_server_port = find_available_port();
+        let mut data = AppData::new();
+        let server = Server::new("127.0.0.1".to_string(), test_server_port);
+
+        // Expect to the server
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        data.exec_data.name = "test_name".to_string();
+        data.exec_data.exec_time = 10.0;
+        server.process_data(data.exec_data.clone()).await.unwrap();
+
+        // Should be inserted on aggregate
+        assert_eq!(
+            server
+                .exec_agg
+                .read()
+                .await
+                .exec_data
+                .get("test_name")
+                .unwrap()
+                .total_exec_time,
+            data.exec_data.exec_time
+        );
+
+        server.process_data(data.exec_data.clone()).await.unwrap();
+
+        // Should be updated with the double of the value
+        assert_eq!(
+            server
+                .exec_agg
+                .read()
+                .await
+                .exec_data
+                .get("test_name")
+                .unwrap()
+                .total_exec_time,
+            data.exec_data.exec_time * 2.0
         );
     }
 
