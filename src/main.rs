@@ -1,19 +1,34 @@
+use std::time::Duration;
+
+use tracing::info;
+
 use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod analytics;
 mod ui;
-use analytics::{requests::ExecAgg, server::Server, reports::DefaultWriter};
+use analytics::{reports::DefaultWriter, requests::ExecAgg, server::Server};
 use ui::app::render_app;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let file = std::fs::File::create("/tmp/skope.log").unwrap();
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "skope=INFO".into()),
         ))
-        .with(tracing_subscriber::fmt::layer().with_writer(file))
-        .init();
+        .with(tracing_subscriber::fmt::layer().with_writer(file));
+
+    // Configure logging based on environment: use file-only when in TUI mode,
+    // and both stdout+file when running headless (in Docker, etc.)
+    if atty::is(atty::Stream::Stdout) {
+        // TUI mode: only log to file to avoid conflicts with the UI
+        registry.init();
+    } else {
+        // Headless mode (Docker, etc.): log to both stdout and file
+        registry
+            .with(tracing_subscriber::fmt::layer()) // Default stdout layer
+            .init();
+    }
 
     let host = std::env::var("SKOPE_HOST").unwrap_or_else(|_| {
         debug!("SKOPE_HOST environment variable not set, using default (0.0.0.0)");
@@ -30,6 +45,13 @@ async fn main() -> std::io::Result<()> {
 
     let exec_agg_ref = server.exec_agg.clone();
     server.init_connection(report_writer).await;
-    render_app(exec_agg_ref)
+    if atty::is(atty::Stream::Stdout) {
+        render_app(exec_agg_ref)
+    } else {
+        info!("TTY not available; TUI will not be displayed.");
+        // Keep the session active
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
 }
-
