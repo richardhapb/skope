@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 #[derive(Debug)]
 struct App {
     pages: Vec<Page>,
+    charts: Vec<Arc<RwLock<Chart>>>,
     current_page: usize,
     exit: bool,
 }
@@ -30,15 +31,25 @@ impl Default for App {
                 Page::First((MetricType::TotalExecTime, MetricType::TotalMemoryUsage)),
                 Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage)),
             ],
+            charts: vec![],
             current_page: 0,
             exit: false,
         }
     }
 }
 
+impl App {
+    fn new(charts: Vec<Arc<RwLock<Chart>>>) -> Self {
+        Self {
+            charts,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Chart {
-    exec_agg: ExecAgg,
+    exec_agg: Arc<RwLock<ExecAgg>>,
     metric_type: MetricType,
 }
 
@@ -78,6 +89,18 @@ impl Widget for ChartWidget {
     where
         Self: Sized,
     {
+        let mut exec_agg_data = Default::default();
+
+        // If cannot retrieve data, return without render
+        if let Ok(chart) = self.0.try_read() {
+            if let Ok(data) = chart.try_clone_data() {
+                exec_agg_data = data;
+            }
+        } else {
+            debug!("Cannot read chart data, skipping rendering");
+            return;
+        }
+
         let title = match self.0.try_read() {
             Ok(chart) => Line::from(format!("{}", chart.metric_type)).bold(),
             Err(_) => Line::from("Chart (Loading...)").bold(),
@@ -98,19 +121,7 @@ impl Widget for ChartWidget {
         )
         .split(inner_area);
 
-        let data = match self.0.try_read() {
-            Ok(guard) => {
-                info!(
-                    "Rendering chart with {} data items",
-                    guard.exec_agg.exec_data.len()
-                );
-                guard.exec_agg.clone()
-            }
-            Err(_) => {
-                error!("Error reading data in chart");
-                ExecAgg::default()
-            }
-        };
+        let data = exec_agg_data.exec_data;
 
         // Label for the x-axis
         Paragraph::new(Text::from(vec![Line::from(
@@ -120,22 +131,21 @@ impl Widget for ChartWidget {
         .render(inner_layout[1], buf);
 
         // Early return if no data to display
-        if data.exec_data.is_empty() {
+        if data.is_empty() {
             info!("No data to render, skipping chart");
             return;
         }
 
-        debug!("Rendering chart with {} data points", data.exec_data.len());
-
         let gap: u16 = 2; // gap between bars
-        let data_len = data.exec_data.len();
+
+        let data_len = data.len();
+        debug!("Rendering chart with {} data points", data_len);
 
         let bars = if data_len == 0 {
             HashMap::new()
         } else {
             // Find the maximum execution time for scaling
             let max_time = data
-                .exec_data
                 .values()
                 .map(|d| {
                     match self.0.try_read() {
@@ -155,7 +165,7 @@ impl Widget for ChartWidget {
 
             let mut map = HashMap::new();
 
-            for (i, d) in data.exec_data.values().enumerate() {
+            for (i, d) in data.values().enumerate() {
                 let val = match self.0.try_read() {
                     Ok(chart) => match chart.metric_type {
                         MetricType::TotalExecTime => d.total_exec_time,
@@ -166,11 +176,13 @@ impl Widget for ChartWidget {
                     Err(_) => 0.0, // Default value when lock can't be acquired
                 };
 
-                // Calculate scaled height - use 80% of available height for max value
+                // Calculate scaled height - use 70% of available height for max value
                 let height =
-                    ((val as f64 / max_time as f64) * inner_layout[0].height as f64 * 0.8) as u16;
+                    ((val as f64 / max_time as f64) * inner_layout[0].height as f64 * 0.7) as u16;
                 // Ensure minimum visible height
                 let height = std::cmp::max(height, 1);
+                // Ensure height inner bound
+                let height = std::cmp::min(height, 38);
 
                 // Position at bottom of chart area
                 let y = inner_layout[0].height.saturating_sub(height + 3); // 3 = Keep space for labels
@@ -266,14 +278,22 @@ impl Chart {
     fn new(metric_type: MetricType, exec_agg: Option<Arc<RwLock<ExecAgg>>>) -> Self {
         if let Some(exec_agg) = exec_agg {
             Self {
-                exec_agg: exec_agg.try_read().unwrap().clone(), // Unwrap because app is initializing
+                exec_agg: exec_agg,
                 metric_type,
             }
         } else {
             Self {
-                exec_agg: ExecAgg::default(),
+                exec_agg: Arc::new(RwLock::new(ExecAgg::default())),
                 metric_type,
             }
+        }
+    }
+
+    fn try_clone_data(&self) -> Result<ExecAgg, Box<dyn std::error::Error>> {
+        if let Ok(data) = self.exec_agg.try_read() {
+            Ok(data.clone())
+        } else {
+            Err("Cannot read data")?
         }
     }
 
@@ -288,8 +308,8 @@ impl Chart {
                 );
 
                 {
-                    let mut chart = chart.write().await;
-                    chart.exec_agg = new_data;
+                    let chart = chart.read().await;
+                    *chart.exec_agg.write().await = new_data;
                     trace!("Chart updated successfully");
                 }
 
@@ -300,30 +320,26 @@ impl Chart {
 }
 
 impl App {
-    fn run(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        chart1: &Arc<RwLock<Chart>>,
-        chart2: &Arc<RwLock<Chart>>,
-    ) -> std::io::Result<()> {
-        let chart1_ref = chart1.clone();
-        let chart2_ref = chart2.clone();
-
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         while !self.exit {
-            terminal.draw(|frame| self.draw(frame, &chart1_ref, &chart2_ref))?;
+            terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
-            self.handle_pages(&chart1_ref, &chart2_ref);
+            self.handle_pages();
         }
 
         Ok(())
     }
 
-    fn handle_pages(&self, chart1: &Arc<RwLock<Chart>>, chart2: &Arc<RwLock<Chart>>) {
+    fn handle_pages(&self) {
         // Get the current page configuration
         if let Some(page) = self.pages.get(self.current_page).cloned() {
-            // Clone the Arc references to extend their lifetime
-            let chart1 = chart1.clone();
-            let chart2 = chart2.clone();
+            if self.charts.len() != 2 {
+                error!("Only two charts are allowed");
+                return;
+            }
+
+            let chart1 = self.charts.first().unwrap().clone();
+            let chart2 = self.charts.get(1).unwrap().clone();
 
             // Update chart metrics based on the current page
             tokio::spawn(async move {
@@ -347,15 +363,19 @@ impl App {
         }
     }
 
-    fn draw(&self, frame: &mut Frame, chart1: &Arc<RwLock<Chart>>, chart2: &Arc<RwLock<Chart>>) {
+    fn draw(&self, frame: &mut Frame) {
+        if self.charts.len() != 2 {
+            panic!("Only two charts are allowed");
+        }
+
         let layout = Layout::new(
             Direction::Vertical,
             vec![Constraint::Percentage(50), Constraint::Percentage(50)],
         )
         .split(frame.area());
 
-        frame.render_widget(ChartWidget(chart1.clone()), layout[0]);
-        frame.render_widget(ChartWidget(chart2.clone()), layout[1]);
+        frame.render_widget(ChartWidget(self.charts.first().unwrap().clone()), layout[0]);
+        frame.render_widget(ChartWidget(self.charts.get(1).unwrap().clone()), layout[1]);
     }
 
     fn handle_events(&mut self) -> std::io::Result<()> {
@@ -379,6 +399,12 @@ impl App {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Left | KeyCode::Char('h') => self.change_page(-1),
             KeyCode::Right | KeyCode::Char('l') => self.change_page(1),
+            KeyCode::Char('r') => {
+                let chart = self.charts.first().unwrap().clone();
+                tokio::spawn(async move {
+                    chart.read().await.exec_agg.write().await.exec_data.clear();
+                });
+            }
             _ => {}
         }
     }
@@ -409,14 +435,22 @@ impl App {
 pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     trace!("Rendering app");
 
-    let chart1 = Arc::new(RwLock::new(Chart::new(MetricType::TotalExecTime, None)));
-    let chart2 = Arc::new(RwLock::new(Chart::new(MetricType::TotalExecCount, None)));
+    let chart1 = Arc::new(RwLock::new(Chart::new(
+        MetricType::TotalExecTime,
+        Some(exec_agg.clone()),
+    )));
+    let chart2 = Arc::new(RwLock::new(Chart::new(
+        MetricType::TotalExecCount,
+        Some(exec_agg.clone()),
+    )));
 
     Chart::start_periodic_updates(chart1.clone(), exec_agg.clone());
     Chart::start_periodic_updates(chart2.clone(), exec_agg);
 
+    let charts = vec![chart1, chart2];
+
     let mut terminal = ratatui::init();
-    let app_result = App::default().run(&mut terminal, &chart1, &chart2);
+    let app_result = App::new(charts).run(&mut terminal);
     ratatui::restore();
     app_result
 }
