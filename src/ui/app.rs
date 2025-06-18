@@ -47,7 +47,7 @@ impl App {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Chart {
     exec_agg: Arc<RwLock<ExecAgg>>,
     metric_type: MetricType,
@@ -89,22 +89,22 @@ impl Widget for ChartWidget {
     where
         Self: Sized,
     {
-        let mut exec_agg_data = Default::default();
+        // Use a blocking operation to safely wait for the data.
+        // This approach ensures that the data is retrieved and waits for it
+        // if it is not available, instead of using try_read in multiple places.
+        // Also, the fallback with empty values is unexpected here. It is important
+        // consider that the [`ExecAgg`] can be expensive if the data is large.
+        // In this case, the data only stores aggregate data and "groups" it into a few fields.
+        let (chart, exec_agg_data) = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let chart = self.0.read().await;
 
-        // If cannot retrieve data, return without render
-        if let Ok(chart) = self.0.try_read() {
-            if let Ok(data) = chart.try_clone_data() {
-                exec_agg_data = data;
-            }
-        } else {
-            debug!("Cannot read chart data, skipping rendering");
-            return;
-        }
+                (chart.clone(), chart.exec_agg.read().await.clone())
+            })
+        });
 
-        let title = match self.0.try_read() {
-            Ok(chart) => Line::from(format!("{}", chart.metric_type)).bold(),
-            Err(_) => Line::from("Chart (Loading...)").bold(),
-        };
+        let title = Line::from(format!("{}", chart.metric_type)).bold();
         let block = Block::bordered()
             .title(title.centered())
             .border_set(border::ROUNDED);
@@ -147,16 +147,11 @@ impl Widget for ChartWidget {
             // Find the maximum execution time for scaling
             let max_time = data
                 .values()
-                .map(|d| {
-                    match self.0.try_read() {
-                        Ok(chart) => match chart.metric_type {
-                            MetricType::TotalExecTime => d.total_exec_time,
-                            MetricType::TotalMemoryUsage => d.total_memory_usage,
-                            MetricType::TotalExecCount => d.total_execs as f32,
-                            MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
-                        },
-                        Err(_) => 0.0, // Default value when lock can't be acquired
-                    }
+                .map(|d| match chart.metric_type {
+                    MetricType::TotalExecTime => d.total_exec_time,
+                    MetricType::TotalMemoryUsage => d.total_memory_usage,
+                    MetricType::TotalExecCount => d.total_execs as f32,
+                    MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
                 })
                 .fold(0.0, f32::max);
 
@@ -166,14 +161,11 @@ impl Widget for ChartWidget {
             let mut map = HashMap::new();
 
             for (i, d) in data.values().enumerate() {
-                let val = match self.0.try_read() {
-                    Ok(chart) => match chart.metric_type {
-                        MetricType::TotalExecTime => d.total_exec_time,
-                        MetricType::TotalMemoryUsage => d.total_memory_usage,
-                        MetricType::TotalExecCount => d.total_execs as f32,
-                        MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
-                    },
-                    Err(_) => 0.0, // Default value when lock can't be acquired
+                let val = match chart.metric_type {
+                    MetricType::TotalExecTime => d.total_exec_time,
+                    MetricType::TotalMemoryUsage => d.total_memory_usage,
+                    MetricType::TotalExecCount => d.total_execs as f32,
+                    MetricType::TimeAverage => d.total_exec_time / d.total_execs as f32,
                 };
 
                 // Calculate scaled height - use 70% of available height for max value
@@ -224,14 +216,9 @@ impl Widget for ChartWidget {
                 );
                 if safe_width > 0 {
                     let text = "█".repeat(safe_width);
-                    let text = match self.0.try_read() {
-                        Ok(chart) => match chart.metric_type {
-                            MetricType::TotalExecCount | MetricType::TotalMemoryUsage => {
-                                text.yellow()
-                            }
-                            MetricType::TotalExecTime | MetricType::TimeAverage => text.blue(),
-                        },
-                        Err(_) => text.yellow(),
+                    let text = match chart.metric_type {
+                        MetricType::TotalExecCount | MetricType::TotalMemoryUsage => text.yellow(),
+                        MetricType::TotalExecTime | MetricType::TimeAverage => text.blue(),
                     };
                     let line = Line::from(vec![" ".into(), text, " ".into()]);
                     lines.push(line.centered());
@@ -286,14 +273,6 @@ impl Chart {
                 exec_agg: Arc::new(RwLock::new(ExecAgg::default())),
                 metric_type,
             }
-        }
-    }
-
-    fn try_clone_data(&self) -> Result<ExecAgg, Box<dyn std::error::Error>> {
-        if let Ok(data) = self.exec_agg.try_read() {
-            Ok(data.clone())
-        } else {
-            Err("Cannot read data")?
         }
     }
 
