@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::info;
@@ -6,6 +7,7 @@ use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod analytics;
 mod ui;
+// mod database;
 use analytics::{reports::DefaultWriter, requests::ExecAgg, server::Server};
 use ui::app::render_app;
 
@@ -39,12 +41,12 @@ async fn main() -> std::io::Result<()> {
         9001.to_string()
     });
 
-    let report_writer = DefaultWriter::new(10);
-    let server: Server = Server::new(host, port.parse().unwrap());
+    let report_writer = Arc::new(DefaultWriter::new());
+    let server: Server = Server::new(host, port.parse().unwrap(), report_writer);
     debug!("Initialized with empty aggregation data");
 
     let exec_agg_ref = server.exec_agg.clone();
-    server.init_connection(report_writer).await;
+    server.init_connection().await;
     if atty::is(atty::Stream::Stdout) {
         render_app(exec_agg_ref)
     } else {

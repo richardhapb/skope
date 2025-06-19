@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, hash::Hash};
+use std::io::{Read, Write};
 use std::sync::Arc;
+use std::{collections::HashMap, hash::Hash};
 use tokio::sync::RwLock;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, Default)]
@@ -48,22 +49,11 @@ pub struct AggData {
 
 impl AggData {
     pub async fn update(exec_data: &ExecData, exec_agg: Arc<RwLock<ExecAgg>>) -> Self {
-        let name = exec_data.name.clone();
-        let safe_name = name
-            .replace("/", "-")
-            .replace("?", "x")
-            .replace("\\", "_")
-            .replace(":", "_")
-            .replace("*", "_")
-            .replace("\"", "_")
-            .replace("<", "_")
-            .replace(">", "_")
-            .replace("|", "_")
-            .replace(" ", "_");
+        let safe_name = to_safe_name(&exec_data.name);
 
         let prev_data = {
             let agg = exec_agg.read().await;
-            agg.exec_data.get(&name).cloned()
+            agg.agg_data.get(&exec_data.name).cloned()
         };
 
         let mut total_exec_time = exec_data.exec_time;
@@ -79,37 +69,131 @@ impl AggData {
 
         Self {
             name: safe_name,
-            total_execs: total_execs,
-            total_memory_usage: total_memory_usage,
-            total_exec_time: total_exec_time,
+            total_execs,
+            total_memory_usage,
+            total_exec_time,
             avg_exec_time: total_exec_time / total_execs as f32,
             avg_exec_memory: total_memory_usage / total_execs as f32,
         }
     }
-}
 
-#[derive(Debug, Default, Clone)]
-pub struct ExecAgg {
-    pub exec_data: HashMap<String, AggData>,
-}
+    pub fn difference(&self, other: &Self) -> Self {
+        let safe_name = to_safe_name(&self.name);
 
-impl Serialize for ExecAgg {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
+        let total_execs = self.total_execs - other.total_execs;
+        let total_memory_usage = self.total_memory_usage - other.total_memory_usage;
+        let total_exec_time = self.total_exec_time - other.total_exec_time;
+        let avg_exec_time = self.avg_exec_time - other.avg_exec_time;
+        let avg_exec_memory = self.avg_exec_memory - other.avg_exec_memory;
 
-        // Create a map serializer with the number of items in exec_data
-        let mut map = serializer.serialize_map(Some(self.exec_data.len()))?;
-
-        // Iterate through the hashmap entries
-        for (name, agg_data) in &self.exec_data {
-            // Use the name as the key and the agg_data as the value
-            map.serialize_entry(name, agg_data)?;
+        Self {
+            name: safe_name,
+            total_execs,
+            total_memory_usage,
+            total_exec_time,
+            avg_exec_time,
+            avg_exec_memory,
         }
-
-        // Finalize and return the map
-        map.end()
     }
 }
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ExecAgg {
+    pub agg_data: HashMap<String, AggData>,
+}
+
+impl ExecAgg {
+    pub fn compare_files(&self, filename1: &str, filename2: &str) -> std::io::Result<ExecAggDiff> {
+        // Ensures the extension
+        let filename1 = ensure_extension(filename1, "json");
+        let filename2 = ensure_extension(filename2, "json");
+
+        let mut file1 = std::fs::File::open(filename1)?;
+        let mut file2 = std::fs::File::open(filename2)?;
+
+        let mut str1 = String::new();
+        let mut str2 = String::new();
+
+        file1.read_to_string(&mut str1)?;
+        file2.read_to_string(&mut str2)?;
+
+        let data1 = serde_json::from_str::<ExecAgg>(&str1)?;
+        let data2 = serde_json::from_str::<ExecAgg>(&str2)?;
+
+        Ok(data1.compare(&data2))
+    }
+
+    pub fn compare(&self, other: &ExecAgg) -> ExecAggDiff {
+        let mut exec_agg = ExecAgg::default();
+        let mut missed: Vec<String> = vec![];
+        let mut exclusive: Vec<String> = vec![];
+        let mut reviewed: Vec<&str> = vec![];
+
+        for (name, agg_data) in &self.agg_data {
+            if let Some(other_data) = other.agg_data.get(name) {
+                exec_agg
+                    .agg_data
+                    .insert(name.to_string(), agg_data.difference(other_data));
+            } else {
+                exclusive.push(name.to_string());
+            }
+
+            reviewed.push(name);
+        }
+
+        let mut other_names = other.agg_data.keys();
+        while reviewed.len() < other_names.len() {
+            if let Some(name) = other_names.next() {
+                if !reviewed.contains(&name.as_str()) {
+                    missed.push(name.to_string());
+                    reviewed.push(name);
+                }
+            } else {
+                break;
+            }
+        }
+
+        ExecAggDiff {
+            exec_agg,
+            exclusive,
+            missed,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ExecAggDiff {
+    pub exec_agg: ExecAgg,
+    // The apps that only has the first [`ExecAgg`] instance
+    pub exclusive: Vec<String>,
+    // The apps missing for the first [`ExecAgg`]
+    pub missed: Vec<String>,
+}
+
+fn ensure_extension(filename: &str, extension: &str) -> String {
+    if filename.ends_with(extension) {
+        filename.to_string()
+    } else {
+        format!("{}.{}", filename, extension)
+    }
+}
+
+fn to_safe_name(name: &str) -> String {
+    name.replace("/", "-")
+        .replace("?", "x")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace("*", "_")
+        .replace("\"", "_")
+        .replace("<", "_")
+        .replace(">", "_")
+        .replace("|", "_")
+        .replace(" ", "_")
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+}
+

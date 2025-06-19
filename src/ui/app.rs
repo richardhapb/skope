@@ -8,11 +8,18 @@ use ratatui::{
     widgets::{Block, Paragraph, Widget},
 };
 use std::fmt::Display;
+use std::sync::mpsc::{SyncSender, sync_channel};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use tracing::{debug, error, info, trace};
 
-use crate::ExecAgg;
+use crate::{
+    ExecAgg,
+    analytics::{
+        reports::{DefaultWriter, ReportWriter},
+        requests::ExecAggDiff,
+    },
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
@@ -22,27 +29,20 @@ struct App {
     charts: Vec<Arc<RwLock<Chart>>>,
     current_page: usize,
     exit: bool,
+    report_writer: Arc<dyn ReportWriter>,
 }
 
-impl Default for App {
-    fn default() -> Self {
+impl App {
+    fn new(charts: Vec<Arc<RwLock<Chart>>>, report_writer: Arc<dyn ReportWriter>) -> Self {
         Self {
             pages: vec![
                 Page::First((MetricType::TotalExecTime, MetricType::TotalMemoryUsage)),
                 Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage)),
             ],
-            charts: vec![],
+            charts,
             current_page: 0,
             exit: false,
-        }
-    }
-}
-
-impl App {
-    fn new(charts: Vec<Arc<RwLock<Chart>>>) -> Self {
-        Self {
-            charts,
-            ..Default::default()
+            report_writer,
         }
     }
 }
@@ -121,7 +121,7 @@ impl Widget for ChartWidget {
         )
         .split(inner_area);
 
-        let data = exec_agg_data.exec_data;
+        let data = exec_agg_data.agg_data;
 
         // Label for the x-axis
         Paragraph::new(Text::from(vec![Line::from(
@@ -283,7 +283,7 @@ impl Chart {
 
                 debug!(
                     "Chart update: found {} data points",
-                    new_data.exec_data.len()
+                    new_data.agg_data.len()
                 );
 
                 {
@@ -353,6 +353,7 @@ impl App {
         )
         .split(frame.area());
 
+        // TODO: Improve this and make it dynamic
         frame.render_widget(ChartWidget(self.charts.first().unwrap().clone()), layout[0]);
         frame.render_widget(ChartWidget(self.charts.get(1).unwrap().clone()), layout[1]);
     }
@@ -379,13 +380,82 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.change_page(-1),
             KeyCode::Right | KeyCode::Char('l') => self.change_page(1),
             KeyCode::Char('r') => {
-                let chart = self.charts.first().unwrap().clone();
-                tokio::spawn(async move {
-                    chart.read().await.exec_agg.write().await.exec_data.clear();
-                });
+                self.reset_data();
+            }
+            // Capture a new profile data with the current data, clear the dashboard, also wait until
+            // `s` is pressed, then finalize the captures and render the difference.
+            KeyCode::Char('c') => {
+                // TODO: I need to implement the SQLite storage
+                // Capture to database the data, for now we capturing it to a file
+                self.capture_and_reset_data("capture1.json".to_string());
+            }
+            KeyCode::Char('s') => {
+                // Here i need to handle the rendering of the comparation
+                let (sender, receiver) = sync_channel::<Option<ExecAggDiff>>(1);
+                self.capture_and_compare_data(
+                    "capture1.json".to_string(),
+                    "capture2.json".to_string(),
+                    sender,
+                );
+                let diff = receiver.recv();
+
+                info!(?diff);
             }
             _ => {}
         }
+    }
+
+    fn reset_data(&self) {
+        let chart = self.charts.first().unwrap().clone();
+        tokio::spawn(async move {
+            chart.read().await.exec_agg.write().await.agg_data.clear();
+        });
+    }
+
+    fn capture_and_compare_data(
+        &self,
+        previous_filename: String,
+        new_capture_filename: String,
+        sender: SyncSender<Option<ExecAggDiff>>,
+    ) {
+        let chart = self.charts.first().unwrap().clone();
+        let report_writer = self.report_writer.clone();
+        tokio::spawn(async move {
+            let chart = chart.read().await;
+            let exec_agg = chart.exec_agg.read().await;
+            if let Err(e) =
+                report_writer.generate_report(&exec_agg.clone(), Some(&new_capture_filename))
+            {
+                error!(%e, "Error capturing file; skipping data clearance.");
+                return;
+            }
+
+            // TODO: Handle the errors
+            match exec_agg.compare_files(&previous_filename, &new_capture_filename) {
+                Ok(diff) => {
+                    sender.send(Some(diff)).unwrap();
+                }
+                Err(e) => {
+                    error!(%e, "Error comparing files");
+                    sender.send(None).unwrap();
+                }
+            }
+        });
+    }
+
+    fn capture_and_reset_data(&self, filename: String) {
+        let chart = self.charts.first().unwrap().clone();
+        // Clone report_writer or obtain an owned version before spawning
+        let report_writer = self.report_writer.clone();
+        tokio::spawn(async move {
+            let chart = chart.read().await;
+            let exec_agg = chart.exec_agg.read().await;
+            if let Err(e) = report_writer.generate_report(&*exec_agg, Some(&filename)) {
+                error!(%e, "Error capturing file; skipping data clearance.");
+                return;
+            }
+            chart.exec_agg.write().await.agg_data.clear();
+        });
     }
 
     fn change_page(&mut self, offset: i16) {
@@ -429,7 +499,8 @@ pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     let charts = vec![chart1, chart2];
 
     let mut terminal = ratatui::init();
-    let app_result = App::new(charts).run(&mut terminal);
+    let report_writer = Arc::new(DefaultWriter::new());
+    let app_result = App::new(charts, report_writer).run(&mut terminal);
     ratatui::restore();
     app_result
 }
@@ -437,10 +508,27 @@ pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analytics::reports::Reportable;
+
+    #[derive(Debug)]
+    struct MockReportWriter;
+
+    impl ReportWriter for MockReportWriter {
+        fn write_reports(&self, _reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn get_iterations_threshold(&self) -> usize {
+            0
+        }
+
+        fn set_iterations_threshold(&mut self, _: usize) {}
+    }
 
     #[test]
     fn test_exit() {
-        let mut app = App::default();
+        let report_writer = Arc::new(MockReportWriter);
+        let mut app = App::new(vec![], report_writer);
         app.handle_key_event(KeyCode::Char('q').into());
 
         assert!(app.exit);

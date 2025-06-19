@@ -1,29 +1,13 @@
 use super::requests::{ExecAgg, ExecData};
+use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::Write;
+use std::ops::Deref;
 use tracing::info;
 
 pub trait Reportable: Sync + Send {
     fn default_path(&self) -> String;
     fn report_data(&self) -> Result<String, serde_json::Error>;
-
-    fn generate_report(&self, path: Option<&str>) -> std::io::Result<()> {
-        if !fs::metadata("reports").is_ok() {
-            fs::create_dir("reports")?;
-        }
-        let default_path = &self.default_path();
-        let report_path = path.unwrap_or(default_path);
-        let mut file = File::create(report_path)?;
-
-        let app_data = self
-            .report_data()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
-        file.write_all(app_data.as_bytes())?;
-        info!(%report_path, "Aggregate report written");
-
-        Ok(())
-    }
 }
 
 impl Reportable for ExecAgg {
@@ -46,22 +30,44 @@ impl Reportable for Vec<ExecData> {
     }
 }
 
-pub trait ReportWriter: Send + Sync + 'static {
+pub trait ReportWriter: Send + Sync + Debug + 'static {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()>;
     fn get_iterations_threshold(&self) -> usize;
     #[allow(dead_code)]
     fn set_iterations_threshold(&mut self, iterations: usize);
+
+    fn generate_report(
+        &self,
+        reportable: &dyn Reportable,
+        path: Option<&str>,
+    ) -> std::io::Result<()> {
+        if !fs::metadata("reports").is_ok() {
+            fs::create_dir("reports")?;
+        }
+        let default_path = &reportable.default_path();
+        let report_path = path.unwrap_or(default_path);
+        let mut file = File::create(report_path)?;
+
+        let app_data = reportable
+            .report_data()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        file.write_all(app_data.as_bytes())?;
+        info!(%report_path, "Aggregate report written");
+
+        Ok(())
+    }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct DefaultWriter {
-    iterations_threshold: usize
+    iterations_threshold: usize,
 }
 
 impl ReportWriter for DefaultWriter {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
         for reportable in reportables {
-            reportable.generate_report(None)?;
+            self.generate_report(reportable.deref(), None)?;
         }
 
         Ok(())
@@ -77,10 +83,9 @@ impl ReportWriter for DefaultWriter {
 }
 
 impl DefaultWriter {
-    pub fn new(iterations_threshold: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-           iterations_threshold 
+            iterations_threshold: 10,
         }
     }
 }
-
