@@ -220,6 +220,30 @@ mod tests {
         (data1, data2)
     }
 
+    #[tokio::test]
+    async fn test_update() {
+        let mut agg1 = AggData::default();
+
+        let mut exec_data = ExecData::default();
+        let mut exec_agg = ExecAgg::default();
+
+        exec_data.name = "test".to_string();
+        exec_data.exec_time = 10.0;
+        exec_data.exec_memory_usage = 20.0;
+
+        agg1.name = "test".to_string();
+        agg1.total_exec_time = 100.0;
+        agg1.total_memory_usage = 200.0;
+
+        exec_agg.agg_data.insert("test".to_string(), agg1);
+
+        let result = AggData::update(&exec_data, Arc::new(RwLock::new(exec_agg))).await;
+
+        assert_eq!(result.name, "test");
+        assert_eq!(result.total_memory_usage, 220.0);
+        assert_eq!(result.total_exec_time, 110.0);
+    }
+
     #[test]
     fn test_compare() {
         let (data1, data2) = generate_diff_data();
