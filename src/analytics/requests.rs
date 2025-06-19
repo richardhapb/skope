@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::Arc;
 use std::{collections::HashMap, hash::Hash};
 use tokio::sync::RwLock;
@@ -80,11 +80,11 @@ impl AggData {
     pub fn difference(&self, other: &Self) -> Self {
         let safe_name = to_safe_name(&self.name);
 
-        let total_execs = self.total_execs - other.total_execs;
-        let total_memory_usage = self.total_memory_usage - other.total_memory_usage;
-        let total_exec_time = self.total_exec_time - other.total_exec_time;
-        let avg_exec_time = self.avg_exec_time - other.avg_exec_time;
-        let avg_exec_memory = self.avg_exec_memory - other.avg_exec_memory;
+        let total_execs = other.total_execs - self.total_execs;
+        let total_memory_usage = other.total_memory_usage - self.total_memory_usage;
+        let total_exec_time = other.total_exec_time - self.total_exec_time;
+        let avg_exec_time = other.avg_exec_time - self.avg_exec_time;
+        let avg_exec_memory = other.avg_exec_memory - self.avg_exec_memory;
 
         Self {
             name: safe_name,
@@ -142,14 +142,12 @@ impl ExecAgg {
         }
 
         let mut other_names = other.agg_data.keys();
-        while reviewed.len() < other_names.len() {
+        while reviewed.len() - exclusive.len() < other.agg_data.len() {
             if let Some(name) = other_names.next() {
                 if !reviewed.contains(&name.as_str()) {
                     missed.push(name.to_string());
                     reviewed.push(name);
                 }
-            } else {
-                break;
             }
         }
 
@@ -162,6 +160,7 @@ impl ExecAgg {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ExecAggDiff {
     pub exec_agg: ExecAgg,
     // The apps that only has the first [`ExecAgg`] instance
@@ -191,9 +190,103 @@ fn to_safe_name(name: &str) -> String {
         .replace(" ", "_")
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-}
+    use crate::analytics::reports::{DefaultWriter, ReportWriter};
 
+    use super::*;
+
+    fn generate_diff_data() -> (ExecAgg, ExecAgg) {
+        let mut data1 = ExecAgg::default();
+        let mut data2 = ExecAgg::default();
+
+        let mut agg1 = AggData::default();
+        let mut agg2 = AggData::default();
+
+        agg1.total_exec_time = 100.0;
+        agg2.total_exec_time = 200.0;
+
+        agg1.total_memory_usage = 200.0;
+        agg2.total_memory_usage = 100.0;
+
+        data1.agg_data.insert("test_1".to_string(), agg1.clone());
+        data2.agg_data.insert("test_1".to_string(), agg2.clone());
+
+        // An exclusive data is inserted
+        data1.agg_data.insert("exclusive_data".to_string(), agg2);
+        // An missed data is inserted to "other"
+        data2.agg_data.insert("missed_data".to_string(), agg1);
+
+        (data1, data2)
+    }
+
+    #[test]
+    fn test_compare() {
+        let (data1, data2) = generate_diff_data();
+
+        let diff = data1.compare(&data2);
+
+        let app_data = diff.exec_agg.agg_data.get("test_1").unwrap();
+
+        assert_eq!(app_data.total_exec_time, 100.0);
+        assert_eq!(app_data.total_memory_usage, -100.0);
+
+        assert!(diff.exclusive.contains(&"exclusive_data".to_string()));
+        assert!(diff.missed.contains(&"missed_data".to_string()));
+    }
+
+    #[test]
+    fn test_difference() {
+        let mut agg1 = AggData::default();
+        let mut agg2 = AggData::default();
+
+        agg1.total_exec_time = 100.0;
+        agg2.total_exec_time = 200.0;
+
+        agg1.total_memory_usage = 200.0;
+        agg2.total_memory_usage = 100.0;
+
+        let diff = agg1.difference(&agg2);
+
+        assert_eq!(diff.total_exec_time, 100.0);
+        assert_eq!(diff.total_memory_usage, -100.0);
+    }
+
+    #[test]
+    fn test_ensure_extension() {
+        let filename = "somefile";
+        let with_extension = ensure_extension(filename, "json");
+
+        assert_eq!(format!("{}.json", filename), with_extension);
+    }
+
+    #[test]
+    fn test_compare_files() {
+        let report_writer = DefaultWriter::new();
+
+        let temp_dir = std::env::temp_dir();
+        let path1 = temp_dir.join("test_file1.json");
+        let path2 = temp_dir.join("test_file2.json");
+
+        let (data1, data2) = generate_diff_data();
+
+        report_writer
+            .generate_report(&data1, Some(path1.to_str().unwrap()))
+            .unwrap();
+        report_writer
+            .generate_report(&data2, Some(path2.to_str().unwrap()))
+            .unwrap();
+
+        let diff = data1
+            .compare_files(path1.to_str().unwrap(), path2.to_str().unwrap())
+            .unwrap();
+
+        let app_data = diff.exec_agg.agg_data.get("test_1").unwrap();
+
+        assert_eq!(app_data.total_exec_time, 100.0);
+        assert_eq!(app_data.total_memory_usage, -100.0);
+
+        assert!(diff.exclusive.contains(&"exclusive_data".to_string()));
+        assert!(diff.missed.contains(&"missed_data".to_string()));
+    }
+}
