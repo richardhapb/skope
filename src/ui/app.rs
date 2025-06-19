@@ -387,14 +387,23 @@ impl App {
             KeyCode::Char('c') => {
                 // TODO: I need to implement the SQLite storage
                 // Capture to database the data, for now we capturing it to a file
-                self.capture_and_reset_data("capture1.json".to_string());
+                let filename = "capture1.json";
+                let temp = std::env::temp_dir();
+                let filepath = temp.join(filename);
+                self.capture_and_reset_data(filepath.to_str().unwrap_or(filename).to_string());
             }
             KeyCode::Char('s') => {
                 // Here i need to handle the rendering of the comparation
+                let filename1 = "capture1.json";
+                let filename2 = "capture2.json";
+                let temp = std::env::temp_dir();
+                let filepath1 = temp.join(filename1);
+                let filepath2 = temp.join(filename2);
+
                 let (sender, receiver) = sync_channel::<Option<ExecAggDiff>>(1);
                 self.capture_and_compare_data(
-                    "capture1.json".to_string(),
-                    "capture2.json".to_string(),
+                    filepath1.to_str().unwrap_or(filename1).to_string(),
+                    filepath2.to_str().unwrap_or(filename2).to_string(),
                     sender,
                 );
                 let diff = receiver.recv();
@@ -421,11 +430,12 @@ impl App {
         let chart = self.charts.first().unwrap().clone();
         let report_writer = self.report_writer.clone();
         tokio::spawn(async move {
-            let chart = chart.read().await;
-            let exec_agg = chart.exec_agg.read().await;
-            if let Err(e) =
-                report_writer.generate_report(&exec_agg.clone(), Some(&new_capture_filename))
-            {
+            let exec_agg = {
+                let chart = chart.read().await;
+                let exec_agg_ref = chart.exec_agg.clone();
+                exec_agg_ref.read().await.clone()
+            };
+            if let Err(e) = report_writer.generate_report(&exec_agg, Some(&new_capture_filename)) {
                 error!(%e, "Error capturing file; skipping data clearance.");
                 return;
             }
@@ -448,13 +458,17 @@ impl App {
         // Clone report_writer or obtain an owned version before spawning
         let report_writer = self.report_writer.clone();
         tokio::spawn(async move {
-            let chart = chart.read().await;
-            let exec_agg = chart.exec_agg.read().await;
-            if let Err(e) = report_writer.generate_report(&*exec_agg, Some(&filename)) {
+            let (exec_agg, exec_agg_ref) = {
+                let chart = chart.read().await;
+                let exec_agg_ref = chart.exec_agg.clone();
+                let exec_agg_clone = exec_agg_ref.read().await.clone();
+                (exec_agg_clone, exec_agg_ref)
+            };
+            if let Err(e) = report_writer.generate_report(&exec_agg, Some(&filename)) {
                 error!(%e, "Error capturing file; skipping data clearance.");
                 return;
             }
-            chart.exec_agg.write().await.agg_data.clear();
+            exec_agg_ref.write().await.agg_data.clear();
         });
     }
 
