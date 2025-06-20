@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Text},
     widgets::{Block, Paragraph, Widget},
 };
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
@@ -20,71 +21,46 @@ use crate::{
         requests::ExecAggDiff,
     },
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
 struct App {
+    current_view: View,
     pages: Vec<Page>,
-    charts: Vec<Arc<RwLock<Chart>>>,
     current_page: usize,
     exit: bool,
     report_writer: Arc<dyn ReportWriter>,
+    rendering_queue: VecDeque<View>,
 }
 
 impl App {
-    fn new(charts: Vec<Arc<RwLock<Chart>>>, report_writer: Arc<dyn ReportWriter>) -> Self {
+    fn new(mut rendering_queue: VecDeque<View>, report_writer: Arc<dyn ReportWriter>) -> Self {
+        let current_view = rendering_queue.pop_front().unwrap_or_default();
+
         Self {
             pages: vec![
                 Page::First((MetricType::TotalExecTime, MetricType::TotalMemoryUsage)),
                 Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage)),
             ],
-            charts,
+            current_view,
             current_page: 0,
             exit: false,
             report_writer,
+            rendering_queue,
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct Chart {
-    exec_agg: Arc<RwLock<ExecAgg>>,
-    metric_type: MetricType,
-}
-
-#[derive(Debug, Clone)]
-enum Page {
-    First((MetricType, MetricType)),
-    Second((MetricType, MetricType)),
-}
-
-#[derive(Debug, Default, Clone)]
-enum MetricType {
-    #[default]
-    TotalExecTime,
-    TotalMemoryUsage,
-    TotalExecCount,
-    TimeAverage,
-}
-
-impl Display for MetricType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let val = match self {
-            MetricType::TotalExecTime => "Total Execution Time (ms)",
-            MetricType::TotalMemoryUsage => "Total Memory Usage (mb)",
-            MetricType::TotalExecCount => "Total executions",
-            MetricType::TimeAverage => "Average Time Per Execution (ms)",
-        };
-
-        write!(f, "{}", val)
-    }
-}
-
+/// Contains a complete view in the screen
 #[derive(Debug, Default)]
-struct ChartWidget(Arc<RwLock<Chart>>);
+struct View {
+    charts: Vec<Chart>,
+    exec_agg: Arc<RwLock<ExecAgg>>,
+    layout: Layout,
+}
 
-impl Widget for ChartWidget {
+impl Widget for &View {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
@@ -95,16 +71,12 @@ impl Widget for ChartWidget {
         // Also, the fallback with empty values is unexpected here. It is important
         // consider that the [`ExecAgg`] can be expensive if the data is large.
         // In this case, the data only stores aggregate data and "groups" it into a few fields.
-        let (chart, exec_agg_data) = tokio::task::block_in_place(|| {
+        let exec_agg_data = tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let chart = self.0.read().await;
-
-                (chart.clone(), chart.exec_agg.read().await.clone())
-            })
+            rt.block_on(async { self.exec_agg.read().await.clone() })
         });
 
-        let title = Line::from(format!("{}", chart.metric_type)).bold();
+        let title = Line::from(format!("{}", self.metric_type)).bold();
         let block = Block::bordered()
             .title(title.centered())
             .border_set(border::ROUNDED);
@@ -147,7 +119,7 @@ impl Widget for ChartWidget {
             // Find the maximum execution time for scaling
             let max_time = data
                 .values()
-                .map(|d| match chart.metric_type {
+                .map(|d| match self.metric_type {
                     MetricType::TotalExecTime => d.total_exec_time,
                     MetricType::TotalMemoryUsage => d.total_memory_usage,
                     MetricType::TotalExecCount => d.total_execs as f32,
@@ -161,7 +133,7 @@ impl Widget for ChartWidget {
             let mut map = HashMap::new();
 
             for (i, d) in data.values().enumerate() {
-                let val = match chart.metric_type {
+                let val = match self.metric_type {
                     MetricType::TotalExecTime => d.total_exec_time,
                     MetricType::TotalMemoryUsage => d.total_memory_usage,
                     MetricType::TotalExecCount => d.total_execs as f32,
@@ -216,7 +188,7 @@ impl Widget for ChartWidget {
                 );
                 if safe_width > 0 {
                     let text = "█".repeat(safe_width);
-                    let text = match chart.metric_type {
+                    let text = match self.metric_type {
                         MetricType::TotalExecCount | MetricType::TotalMemoryUsage => text.yellow(),
                         MetricType::TotalExecTime | MetricType::TimeAverage => text.blue(),
                     };
@@ -261,84 +233,14 @@ impl Widget for ChartWidget {
     }
 }
 
-impl Chart {
-    fn new(metric_type: MetricType, exec_agg: Option<Arc<RwLock<ExecAgg>>>) -> Self {
-        if let Some(exec_agg) = exec_agg {
-            Self {
-                exec_agg: exec_agg,
-                metric_type,
-            }
-        } else {
-            Self {
-                exec_agg: Arc::new(RwLock::new(ExecAgg::default())),
-                metric_type,
-            }
-        }
-    }
+impl View {
+    fn new(charts: Vec<Chart>, exec_agg: Arc<RwLock<ExecAgg>>, layout: Option<Layout>) -> Self {
+        let layout = layout.unwrap_or_default();
 
-    fn start_periodic_updates(chart: Arc<RwLock<Self>>, exec_agg: Arc<RwLock<ExecAgg>>) {
-        tokio::spawn(async move {
-            loop {
-                let new_data = exec_agg.read().await.clone();
-
-                debug!(
-                    "Chart update: found {} data points",
-                    new_data.agg_data.len()
-                );
-
-                {
-                    let chart = chart.read().await;
-                    *chart.exec_agg.write().await = new_data;
-                    trace!("Chart updated successfully");
-                }
-
-                tokio::time::sleep(Duration::from_secs(1)).await; // Update the data each second
-            }
-        });
-    }
-}
-
-impl App {
-    fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
-            self.handle_pages();
-        }
-
-        Ok(())
-    }
-
-    fn handle_pages(&self) {
-        // Get the current page configuration
-        if let Some(page) = self.pages.get(self.current_page).cloned() {
-            if self.charts.len() != 2 {
-                error!("Only two charts are allowed");
-                return;
-            }
-
-            let chart1 = self.charts.first().unwrap().clone();
-            let chart2 = self.charts.get(1).unwrap().clone();
-
-            // Update chart metrics based on the current page
-            tokio::spawn(async move {
-                match page {
-                    Page::First((metric1, metric2)) => {
-                        let mut c1 = chart1.write().await;
-                        c1.metric_type = metric1.clone();
-
-                        let mut c2 = chart2.write().await;
-                        c2.metric_type = metric2.clone();
-                    }
-                    Page::Second((metric1, metric2)) => {
-                        let mut c1 = chart1.write().await;
-                        c1.metric_type = metric1.clone();
-
-                        let mut c2 = chart2.write().await;
-                        c2.metric_type = metric2.clone();
-                    }
-                }
-            });
+        Self {
+            charts,
+            exec_agg,
+            layout,
         }
     }
 
@@ -347,15 +249,93 @@ impl App {
             panic!("Only two charts are allowed");
         }
 
-        let layout = Layout::new(
-            Direction::Vertical,
-            vec![Constraint::Percentage(50), Constraint::Percentage(50)],
-        )
-        .split(frame.area());
+        for layout in self.layout.split(frame.area()).iter() {
+            frame.render_widget(self, *layout);
+        }
+    }
+}
 
-        // TODO: Improve this and make it dynamic
-        frame.render_widget(ChartWidget(self.charts.first().unwrap().clone()), layout[0]);
-        frame.render_widget(ChartWidget(self.charts.get(1).unwrap().clone()), layout[1]);
+#[derive(Debug, Default, Clone)]
+struct Chart {
+    metric_type: MetricType,
+}
+
+#[derive(Debug, Clone)]
+enum Page {
+    First((MetricType, MetricType)),
+    Second((MetricType, MetricType)),
+}
+
+#[derive(Debug, Default, Clone)]
+enum MetricType {
+    #[default]
+    TotalExecTime,
+    TotalMemoryUsage,
+    TotalExecCount,
+    TimeAverage,
+}
+
+impl Display for MetricType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let val = match self {
+            MetricType::TotalExecTime => "Total Execution Time (ms)",
+            MetricType::TotalMemoryUsage => "Total Memory Usage (mb)",
+            MetricType::TotalExecCount => "Total executions",
+            MetricType::TimeAverage => "Average Time Per Execution (ms)",
+        };
+
+        write!(f, "{}", val)
+    }
+}
+
+impl Chart {
+    fn new(metric_type: MetricType) -> Self {
+        Self { metric_type }
+    }
+}
+
+impl App {
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        while !self.exit {
+            // If there is a view in queue render it, otherwise
+            // render the current view
+            terminal.draw(|frame| {
+                if let Some(view) = self.rendering_queue.pop_front() {
+                    view.draw(frame);
+                } else {
+                    self.current_view.draw(frame);
+                }
+            })?;
+            self.handle_events()?;
+            self.handle_pages();
+        }
+
+        Ok(())
+    }
+
+    fn handle_pages(&mut self) {
+        // Get the current page configuration
+        if let Some(page) = self.pages.get(self.current_page).cloned() {
+            if self.current_view.charts.len() != 2 {
+                error!("Only two charts are allowed");
+                return;
+            }
+
+            let view = match page {
+                Page::First((metric1, metric2)) => {
+                    let c1 = Chart::new(metric1);
+                    let c2 = Chart::new(metric2);
+                    View::new(vec![c1, c2], self.current_view.exec_agg.clone(), Some(self.current_view.layout.clone()))
+                }
+                Page::Second((metric1, metric2)) => {
+                    let c1 = Chart::new(metric1);
+                    let c2 = Chart::new(metric2);
+                    View::new(vec![c1, c2], self.current_view.exec_agg.clone(), Some(self.current_view.layout.clone()))
+                }
+            };
+
+            self.rendering_queue.push_back(view);
+        }
     }
 
     fn handle_events(&mut self) -> std::io::Result<()> {
@@ -415,9 +395,9 @@ impl App {
     }
 
     fn reset_data(&self) {
-        let chart = self.charts.first().unwrap().clone();
+        let exec_agg_ref = self.current_view.exec_agg.clone();
         tokio::spawn(async move {
-            chart.read().await.exec_agg.write().await.agg_data.clear();
+            exec_agg_ref.write().await.agg_data.clear();
         });
     }
 
@@ -427,14 +407,10 @@ impl App {
         new_capture_filename: String,
         sender: SyncSender<Option<ExecAggDiff>>,
     ) {
-        let chart = self.charts.first().unwrap().clone();
         let report_writer = self.report_writer.clone();
+        let exec_agg_ref = self.current_view.exec_agg.clone();
         tokio::spawn(async move {
-            let exec_agg = {
-                let chart = chart.read().await;
-                let exec_agg_ref = chart.exec_agg.clone();
-                exec_agg_ref.read().await.clone()
-            };
+            let exec_agg = { exec_agg_ref.read().await.clone() };
             if let Err(e) = report_writer.generate_report(&exec_agg, Some(&new_capture_filename)) {
                 error!(%e, "Error capturing file; skipping data clearance.");
                 return;
@@ -454,13 +430,11 @@ impl App {
     }
 
     fn capture_and_reset_data(&self, filename: String) {
-        let chart = self.charts.first().unwrap().clone();
         // Clone report_writer or obtain an owned version before spawning
         let report_writer = self.report_writer.clone();
+        let exec_agg_ref = self.current_view.exec_agg.clone();
         tokio::spawn(async move {
             let (exec_agg, exec_agg_ref) = {
-                let chart = chart.read().await;
-                let exec_agg_ref = chart.exec_agg.clone();
                 let exec_agg_clone = exec_agg_ref.read().await.clone();
                 (exec_agg_clone, exec_agg_ref)
             };
@@ -498,23 +472,22 @@ impl App {
 pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     trace!("Rendering app");
 
-    let chart1 = Arc::new(RwLock::new(Chart::new(
-        MetricType::TotalExecTime,
-        Some(exec_agg.clone()),
-    )));
-    let chart2 = Arc::new(RwLock::new(Chart::new(
-        MetricType::TotalExecCount,
-        Some(exec_agg.clone()),
-    )));
-
-    Chart::start_periodic_updates(chart1.clone(), exec_agg.clone());
-    Chart::start_periodic_updates(chart2.clone(), exec_agg);
+    let chart1 = Chart::new(MetricType::TotalExecTime);
+    let chart2 = Chart::new(MetricType::TotalExecCount);
 
     let charts = vec![chart1, chart2];
 
     let mut terminal = ratatui::init();
     let report_writer = Arc::new(DefaultWriter::new());
-    let app_result = App::new(charts, report_writer).run(&mut terminal);
+    let mut deque = VecDeque::new();
+
+    let layout = Layout::new(
+        Direction::Vertical,
+        vec![Constraint::Percentage(50), Constraint::Percentage(50)],
+    );
+    let view = View::new(charts, exec_agg, Some(layout));
+    deque.push_back(view);
+    let app_result = App::new(deque, report_writer).run(&mut terminal);
     ratatui::restore();
     app_result
 }
@@ -542,7 +515,7 @@ mod tests {
     #[test]
     fn test_exit() {
         let report_writer = Arc::new(MockReportWriter);
-        let mut app = App::new(vec![], report_writer);
+        let mut app = App::new(VecDeque::default(), report_writer);
         app.handle_key_event(KeyCode::Char('q').into());
 
         assert!(app.exit);
