@@ -2,8 +2,11 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
 };
-use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Display,
+};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use tracing::{debug, error, trace, warn};
@@ -62,6 +65,18 @@ enum Page {
     First((MetricType, MetricType)),
     Second((MetricType, MetricType)),
     DiffView((MetricType, ExecAggDiff)),
+}
+
+impl Display for Page {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let val = match self {
+            Page::First((m1, m2)) => format!("First page: {}, {}", m1, m2),
+            Page::Second((m1, m2)) => format!("Second page: {}, {}", m1, m2),
+            Page::DiffView((m, _)) => format!("Diff view page: {}", m),
+        };
+
+        write!(f, "{}", val)
+    }
 }
 
 /// Contains a complete view in the screen
@@ -129,7 +144,7 @@ impl App {
     }
 
     fn handle_pages(&mut self) {
-        // Get the current page configuration
+        // Get the page configuration for queuing it.
         let view = match &self.current_page {
             Page::First((metric1, metric2)) => {
                 let c1 = Chart::new(metric1.clone());
@@ -182,11 +197,11 @@ impl App {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Left | KeyCode::Char('h') => {
-                let subsequent_page = self.get_diff_subsequent_page(-1);
+                let subsequent_page = self.get_diff_subsequent_page(-2);
                 self.change_page(-1, subsequent_page)
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                let subsequent_page = self.get_diff_subsequent_page(1);
+                let subsequent_page = self.get_diff_subsequent_page(2);
                 self.change_page(1, subsequent_page)
             }
             KeyCode::Char('r') => {
@@ -232,27 +247,28 @@ impl App {
     }
 
     fn get_diff_subsequent_page(&self, offset: i16) -> Option<Page> {
-        match self.current_page.clone() {
-            Page::DiffView((metric, data)) => {
-                // Find the current metric's index in the metrics_order map
-                let current_idx = self
-                    .metrics_order
-                    .iter()
-                    .find_map(|(k, v)| if *v == metric { Some(*k) } else { None })?;
+        match &self.current_page {
+            Page::DiffView((current_metric, data)) => {
+                // Convert the metrics_order HashMap into a sorted Vec of (index, metric)
+                let mut metrics: Vec<_> = self.metrics_order.iter().collect();
+                metrics.sort_by_key(|&(idx, _)| idx);
 
-                // Calculate the next index - ensure it's within bounds
-                let next_idx = if offset < 0 {
-                    current_idx.saturating_sub(2)
+                // Find the position of the current metric in the sorted list
+                let pos = metrics.iter().position(|(_, m)| **m == *current_metric)?;
+
+                // Calculate the target position with bounds checking
+                let target_pos = if offset < 0 {
+                    pos.checked_sub(offset.unsigned_abs() as usize)
                 } else {
-                    current_idx.saturating_add(2) % self.metrics_order.len()
+                    pos.checked_add(offset as usize)
                 };
 
-                // Safely get the next metric type if it exists
-                self.metrics_order
-                    .get(&next_idx)
-                    .map(|next_metric| Page::DiffView((next_metric.clone(), data)))
+                // Get the metric at the target position if it exists
+                target_pos
+                    .and_then(|idx| metrics.get(idx))
+                    .map(|(_, metric)| Page::DiffView(((**metric).clone(), data.clone())))
             }
-            _ => None, // No subsequent page for other page types
+            _ => None, // Only DiffView pages have subsequent pages
         }
     }
 
@@ -383,10 +399,71 @@ mod tests {
         fn set_iterations_threshold(&mut self, _: usize) {}
     }
 
-    fn test_get_subsequent_page() {
+    #[test]
+    fn test_get_diff_subsequent_page() {
         let report_writer = Arc::new(MockReportWriter);
         let mut app = App::new(VecDeque::default(), report_writer);
-        app.current_page = Page::DiffView((MetricType::TotalExecCount, ExecAggDiff::default()));
+        let test_diff = ExecAggDiff::default();
+
+        // Test each metric position
+        for (idx, metric) in app.metrics_order.clone().iter() {
+            // Set up the current page with this metric
+            app.current_page = Page::DiffView((metric.clone(), test_diff.clone()));
+
+            // Test moving forward
+            let forward_result = app.get_diff_subsequent_page(2);
+            let expected_forward = if idx + 2 < app.metrics_order.len() {
+                app.metrics_order
+                    .get(&(idx + 2))
+                    .map(|m| Page::DiffView((m.clone(), test_diff.clone())))
+            } else {
+                None
+            };
+
+            // Direct comparison which might fail if ExecAggDiff doesn't implement PartialEq,
+            // compare the page types and metrics only
+            match (forward_result, expected_forward) {
+                (Some(Page::DiffView((actual_m, _))), Some(Page::DiffView((expected_m, _)))) => {
+                    assert_eq!(
+                        actual_m, expected_m,
+                        "Forward navigation failed for metric at idx {}",
+                        idx
+                    );
+                }
+                (None, None) => {
+                    // Both are None, this is expected at the end of the list
+                }
+                _ => {
+                    panic!("Unexpected result for forward navigation from idx {}", idx);
+                }
+            }
+
+            // Test moving backward
+            let backward_result = app.get_diff_subsequent_page(-2);
+            let expected_backward = if *idx > 1 {
+                app.metrics_order
+                    .get(&(idx - 2))
+                    .map(|m| Page::DiffView((m.clone(), test_diff.clone())))
+            } else {
+                None
+            };
+
+            match (backward_result, expected_backward) {
+                (Some(Page::DiffView((actual_m, _))), Some(Page::DiffView((expected_m, _)))) => {
+                    assert_eq!(
+                        actual_m, expected_m,
+                        "Backward navigation failed for metric at idx {}",
+                        idx
+                    );
+                }
+                (None, None) => {
+                    // Both are None, this is expected at the start of the list
+                }
+                _ => {
+                    panic!("Unexpected result for backward navigation from idx {}", idx);
+                }
+            }
+        }
     }
 
     #[test]
