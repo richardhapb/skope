@@ -12,7 +12,7 @@ use std::fmt::Display;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ExecAgg,
@@ -52,6 +52,21 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone)]
+enum Page {
+    First((MetricType, MetricType)),
+    Second((MetricType, MetricType)),
+}
+
+#[derive(Debug, Default, Clone)]
+enum MetricType {
+    #[default]
+    TotalExecTime,
+    TotalMemoryUsage,
+    TotalExecCount,
+    TimeAverage,
+}
+
 /// Contains a complete view in the screen
 #[derive(Debug, Default)]
 struct View {
@@ -60,7 +75,41 @@ struct View {
     layout: Layout,
 }
 
-impl Widget for &View {
+impl View {
+    fn new(mut charts: Vec<Chart>, exec_agg: Arc<RwLock<ExecAgg>>, layout: Option<Layout>) -> Self {
+        let layout = layout.unwrap_or_default();
+
+        // Share data with the inner charts
+        for chart in &mut charts {
+            chart.exec_agg = Some(exec_agg.clone());
+        }
+
+        Self {
+            charts,
+            exec_agg,
+            layout,
+        }
+    }
+
+    fn draw(&self, frame: &mut Frame) {
+        // Charts should be the same size than the layout splits
+        for (i, layout) in self.layout.split(frame.area()).iter().enumerate() {
+            if let Some(chart) = self.charts.get(i) {
+                frame.render_widget(chart, *layout);
+            } else {
+                warn!("There are more layouts than charts.");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct Chart {
+    metric_type: MetricType,
+    exec_agg: Option<Arc<RwLock<ExecAgg>>>,
+}
+
+impl Widget for &Chart {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
@@ -73,7 +122,16 @@ impl Widget for &View {
         // In this case, the data only stores aggregate data and "groups" it into a few fields.
         let exec_agg_data = tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
-            rt.block_on(async { self.exec_agg.read().await.clone() })
+            rt.block_on(async { 
+                if let Some(exec_agg) = self.exec_agg.clone() {
+                    exec_agg.read().await.clone()
+                } else {
+                    // This should not happen because
+                    // the data is initialized in each view
+                    warn!("Empty data in exec_agg for Chart rendering");
+                    ExecAgg::default()
+                }
+            })
         });
 
         let title = Line::from(format!("{}", self.metric_type)).bold();
@@ -233,48 +291,6 @@ impl Widget for &View {
     }
 }
 
-impl View {
-    fn new(charts: Vec<Chart>, exec_agg: Arc<RwLock<ExecAgg>>, layout: Option<Layout>) -> Self {
-        let layout = layout.unwrap_or_default();
-
-        Self {
-            charts,
-            exec_agg,
-            layout,
-        }
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        if self.charts.len() != 2 {
-            panic!("Only two charts are allowed");
-        }
-
-        for layout in self.layout.split(frame.area()).iter() {
-            frame.render_widget(self, *layout);
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct Chart {
-    metric_type: MetricType,
-}
-
-#[derive(Debug, Clone)]
-enum Page {
-    First((MetricType, MetricType)),
-    Second((MetricType, MetricType)),
-}
-
-#[derive(Debug, Default, Clone)]
-enum MetricType {
-    #[default]
-    TotalExecTime,
-    TotalMemoryUsage,
-    TotalExecCount,
-    TimeAverage,
-}
-
 impl Display for MetricType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let val = match self {
@@ -290,7 +306,10 @@ impl Display for MetricType {
 
 impl Chart {
     fn new(metric_type: MetricType) -> Self {
-        Self { metric_type }
+        Self {
+            metric_type,
+            exec_agg: None,
+        }
     }
 }
 
@@ -325,12 +344,20 @@ impl App {
                 Page::First((metric1, metric2)) => {
                     let c1 = Chart::new(metric1);
                     let c2 = Chart::new(metric2);
-                    View::new(vec![c1, c2], self.current_view.exec_agg.clone(), Some(self.current_view.layout.clone()))
+                    View::new(
+                        vec![c1, c2],
+                        self.current_view.exec_agg.clone(),
+                        Some(self.current_view.layout.clone()),
+                    )
                 }
                 Page::Second((metric1, metric2)) => {
                     let c1 = Chart::new(metric1);
                     let c2 = Chart::new(metric2);
-                    View::new(vec![c1, c2], self.current_view.exec_agg.clone(), Some(self.current_view.layout.clone()))
+                    View::new(
+                        vec![c1, c2],
+                        self.current_view.exec_agg.clone(),
+                        Some(self.current_view.layout.clone()),
+                    )
                 }
             };
 
