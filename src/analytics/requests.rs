@@ -159,7 +159,7 @@ impl ExecAgg {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct ExecAggDiff {
     pub exec_agg: ExecAgg,
