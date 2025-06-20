@@ -467,6 +467,43 @@ mod tests {
     }
 
     #[test]
+    // Ensure that the page is rendered according to the last queued page.
+    fn test_handle_pages() {
+        let report_writer = Arc::new(MockReportWriter);
+        let mut app = App::new(VecDeque::default(), report_writer);
+
+        let pages = vec![
+            Page::First((MetricType::TotalExecCount, MetricType::TotalMemoryUsage)),
+            Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage)),
+            Page::DiffView((MetricType::TotalExecCount, ExecAggDiff::default())),
+        ];
+
+        for v in 0..3 {
+            let current_page = pages[v].clone();
+            app.current_page = current_page.clone();
+
+            // Should schedule the first page view
+            app.handle_pages();
+
+            let charts = match current_page {
+                Page::First((m1, m2)) | Page::Second((m1, m2)) => vec![m1, m2],
+                Page::DiffView((m1, _)) => vec![MetricType::DiffView(Box::new(m1))],
+            };
+
+            for (i, chart) in app
+                .rendering_queue
+                .pop_front()
+                .unwrap()
+                .charts
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(chart.metric_type, charts[i]);
+            }
+        }
+    }
+
+    #[test]
     fn test_exit() {
         let report_writer = Arc::new(MockReportWriter);
         let mut app = App::new(VecDeque::default(), report_writer);

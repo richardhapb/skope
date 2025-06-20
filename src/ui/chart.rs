@@ -298,6 +298,13 @@ impl Chart {
         min_val: f32,
         inner_layout: &Rc<[Rect]>,
     ) -> u16 {
+        let available_height = if min_val < 0.0 {
+            // Calculate available height (half the space for negative values)
+            inner_layout[0].height as f32 / 2.0 * 0.7
+        } else {
+            inner_layout[0].height as f32 * 0.7
+        };
+
         // For negative values, ensure the bars have proportional heights
         if val < 0.0 {
             let abs_val = val.abs();
@@ -309,9 +316,6 @@ impl Chart {
             } else {
                 abs_val / abs_min
             };
-
-            // Calculate available height (half the space for negative values)
-            let available_height = inner_layout[0].height as f32 / 2.0 * 0.7;
             let height_f32 = proportion * available_height;
 
             return (height_f32.round() as u16)
@@ -327,7 +331,6 @@ impl Chart {
             return 1; // Return minimum height if range is effectively zero
         }
 
-        let available_height = inner_layout[0].height as f32 * 0.7;
         let height_f32 = (val / range) * available_height;
         let height = (height_f32.round() as u16).max(1);
 
