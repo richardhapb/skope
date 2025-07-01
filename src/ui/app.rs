@@ -2,7 +2,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
 };
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::{error::Error, sync::mpsc::{sync_channel, SyncSender}};
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Display,
@@ -14,7 +14,7 @@ use tracing::{debug, error, trace, warn};
 use crate::{
     ExecAgg,
     analytics::{
-        reports::{DefaultWriter, ReportWriter},
+        reports::{ServerWriter, ReportWriter},
         requests::ExecAggDiff,
     },
 };
@@ -356,7 +356,7 @@ impl App {
     }
 }
 
-pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
+pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> Result<(), Box<dyn Error>> {
     trace!("Rendering app");
 
     let chart1 = Chart::new(MetricType::TotalExecTime);
@@ -365,7 +365,7 @@ pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     let charts = vec![chart1, chart2];
 
     let mut terminal = ratatui::init();
-    let report_writer = Arc::new(DefaultWriter::new());
+    let report_writer = Arc::new(ServerWriter::new());
     let mut deque = VecDeque::new();
 
     let layout = Layout::new(
@@ -376,7 +376,8 @@ pub fn render_app(exec_agg: Arc<RwLock<ExecAgg>>) -> std::io::Result<()> {
     deque.push_back(view);
     let app_result = App::new(deque, report_writer).run(&mut terminal);
     ratatui::restore();
-    app_result
+    app_result?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,12 +392,6 @@ mod tests {
         fn write_reports(&self, _reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
             Ok(())
         }
-
-        fn get_iterations_threshold(&self) -> usize {
-            0
-        }
-
-        fn set_iterations_threshold(&mut self, _: usize) {}
     }
 
     #[test]

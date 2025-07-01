@@ -1,4 +1,4 @@
-use super::reports::{DefaultWriter, ReportWriter, Reportable};
+use super::reports::{ReportWriter, Reportable, RunnerWriter, ServerWriter};
 use super::requests::{AggData, ExecAgg, ExecData};
 
 use std::net::SocketAddr;
@@ -20,33 +20,33 @@ pub trait DataProvider {
 
 /// Receive and process the data in Server mode
 #[derive(Debug, Clone)]
-pub struct DataReceiver {
+pub struct ServerReceiver {
     pub exec_agg: Arc<RwLock<ExecAgg>>,
     pub exec_data: Arc<RwLock<Vec<ExecData>>>,
     pub report_writer: Arc<dyn ReportWriter>,
     iteration: Arc<AtomicUsize>,
+    iterations_threshold: usize,
 }
 
-impl Default for DataReceiver {
+impl Default for ServerReceiver {
     fn default() -> Self {
-        let report_writer = Arc::new(DefaultWriter::new());
+        let report_writer = Arc::new(ServerWriter::new());
         Self {
             exec_agg: Arc::new(RwLock::new(ExecAgg::default())),
             exec_data: Arc::new(RwLock::new(vec![])),
             report_writer,
             iteration: Arc::new(AtomicUsize::new(0)),
+            iterations_threshold: 10,
         }
     }
 }
 
-impl DataProvider for DataReceiver {
+impl DataProvider for ServerReceiver {
     /// Handle the main loop that receives connections.
     async fn main_loop(self, listener: TcpListener) {
         let max_connections = Arc::new(tokio::sync::Semaphore::new(500)); // Limit to 500 concurrent connections
 
         tokio::spawn(async move {
-            let server_instance = self;
-
             loop {
                 // Wait for a connection slot to become available
                 let permit = max_connections.clone().acquire_owned().await.unwrap();
@@ -55,7 +55,7 @@ impl DataProvider for DataReceiver {
                     Ok((socket, addr)) => {
                         info!("Client connected: {}", addr);
 
-                        let server_for_client_task = server_instance.clone();
+                        let server_for_client_task = self.clone();
 
                         tokio::spawn(async move {
                             // The permit is dropped when this task completes
@@ -122,7 +122,7 @@ impl DataProvider for DataReceiver {
                                     let counter = n_exec_ref_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                                     let should_generate_report =
-                                    counter + 1 == self.report_writer.get_iterations_threshold();
+                                    counter + 1 == self.iterations_threshold;
 
                                     let exec_data_clone = self.exec_data.read().await.clone();
                                     let exec_agg_clone = self.exec_agg.read().await.clone();
@@ -158,7 +158,7 @@ impl DataProvider for DataReceiver {
     }
 }
 
-impl DataReceiver {
+impl ServerReceiver {
     pub fn new(report_writer: Arc<dyn ReportWriter + 'static>) -> Self {
         Self {
             report_writer,
@@ -187,6 +187,41 @@ impl DataReceiver {
         self.exec_data.write().await.push(parsed);
 
         Ok(())
+    }
+}
+
+/// Handle the data from the runner's execution
+pub struct RunnerReceiver<T: ReportWriter> {
+    pub exec_data: ExecData,
+    pub report_writer: T,
+}
+
+// TODO: IMPLEMENT THIS
+impl DataProvider for RunnerReceiver<RunnerWriter> {
+    async fn main_loop(self, listener: TcpListener) {}
+    async fn handle_client(
+        &self,
+        socket: TcpStream,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+}
+
+impl Default for RunnerReceiver<RunnerWriter> {
+    fn default() -> Self {
+        let report_writer = RunnerWriter::default();
+        Self::new("", report_writer)
+    }
+}
+
+impl<T: ReportWriter> RunnerReceiver<T> {
+    /// Create a new [`RunnerReceiver`] with the current system state
+    pub fn new(name: &str, report_writer: T) -> Self {
+        Self {
+            exec_data: ExecData::from_system_data(name),
+            report_writer,
+        }
     }
 }
 
@@ -229,14 +264,6 @@ mod tests {
             self.generated_flag.store(true, Ordering::SeqCst);
             Ok(())
         }
-
-        fn get_iterations_threshold(&self) -> usize {
-            self.iterations_threshold
-        }
-
-        fn set_iterations_threshold(&mut self, iterations: usize) {
-            self.iterations_threshold = iterations;
-        }
     }
 
     impl MockReportWriter {
@@ -271,9 +298,9 @@ mod tests {
         let test_server_port = find_available_port();
         let report_writer = Arc::new(report_writer_mock);
         let report_writer_mock_clone = report_writer.clone();
-        let data_provider = DataReceiver::new(report_writer);
+        let data_provider = ServerReceiver::new(report_writer);
 
-        let server: Server<DataReceiver> =
+        let server: Server<ServerReceiver> =
             Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
         let server_handle = tokio::spawn(async move {
             server.init_connection().await;
@@ -323,12 +350,8 @@ mod tests {
         let test_server_port = find_available_port();
         let mut data = AppData::new();
         let (mock_writer, _) = MockReportWriter::new();
-        let data_provider = DataReceiver::new(Arc::new(mock_writer));
-        let server = Server::new(
-            "127.0.0.1".to_string(),
-            test_server_port,
-            data_provider
-        );
+        let data_provider = ServerReceiver::new(Arc::new(mock_writer));
+        let server = Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
 
         // Expect to the server
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

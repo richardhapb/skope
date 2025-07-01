@@ -1,23 +1,38 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::RwLock;
+
+use crate::system::manager::SystemManager;
 
 /// Store a unit of execution bench
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct ExecData {
     pub name: String,
     pub module: Option<String>,
-    pub timestamp: f32,
+    pub timestamp: i64,
     pub exec_memory_usage: f32,
-    pub total_memory_global: f32,
+    pub system_manager: SystemManager,
     pub exec_time: f32,
 }
 
 impl PartialEq for ExecData {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
+    }
+}
+
+impl ExecData {
+    pub fn from_system_data(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            module: None,
+            timestamp: chrono::Local::now().timestamp(),
+            exec_memory_usage: 0.0,
+            system_manager: SystemManager::default(),
+            exec_time: 0.0,
+        }
     }
 }
 
@@ -186,7 +201,7 @@ fn to_safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::analytics::reports::{DefaultWriter, ReportWriter};
+    use crate::analytics::reports::{ReportWriter, ServerWriter};
 
     use super::*;
 
@@ -280,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_compare_files() {
-        let report_writer = DefaultWriter::new();
+        let report_writer = ServerWriter::new();
 
         let temp_dir = std::env::temp_dir();
         let path1 = temp_dir.join("test_file1.json");

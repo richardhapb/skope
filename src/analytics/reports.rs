@@ -5,6 +5,7 @@ use std::io::Write;
 use std::ops::Deref;
 use tracing::info;
 
+/// A reportable data
 pub trait Reportable: Sync + Send {
     fn default_path(&self) -> String;
     fn report_data(&self) -> Result<String, serde_json::Error>;
@@ -30,11 +31,9 @@ impl Reportable for Vec<ExecData> {
     }
 }
 
-pub trait ReportWriter: Send + Sync + Debug + 'static {
+/// Generate json reports for the [`Reportable`] data
+pub trait ReportWriter: Send + Sync + Debug {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()>;
-    fn get_iterations_threshold(&self) -> usize;
-    #[allow(dead_code)]
-    fn set_iterations_threshold(&mut self, iterations: usize);
 
     fn generate_report(
         &self,
@@ -60,11 +59,11 @@ pub trait ReportWriter: Send + Sync + Debug + 'static {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct DefaultWriter {
+pub struct ServerWriter {
     iterations_threshold: usize,
 }
 
-impl ReportWriter for DefaultWriter {
+impl ReportWriter for ServerWriter {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
         for reportable in reportables {
             self.generate_report(reportable.deref(), None)?;
@@ -72,20 +71,33 @@ impl ReportWriter for DefaultWriter {
 
         Ok(())
     }
-
-    fn get_iterations_threshold(&self) -> usize {
-        self.iterations_threshold
-    }
-
-    fn set_iterations_threshold(&mut self, iterations: usize) {
-        self.iterations_threshold = iterations;
-    }
 }
 
-impl DefaultWriter {
+impl ServerWriter {
     pub fn new() -> Self {
         Self {
             iterations_threshold: 10,
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RunnerWriter {
+    report_name: String,
+}
+
+impl ReportWriter for RunnerWriter {
+    fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
+        for reportable in reportables {
+            self.generate_report(reportable.deref(), Some(&self.report_name))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl RunnerWriter {
+    pub fn new(name: &str) -> Self {
+        Self { report_name: name.to_string() }
     }
 }
