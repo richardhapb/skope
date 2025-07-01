@@ -1,7 +1,7 @@
 use super::data::DataProvider;
 
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct Server<T: DataProvider + Default> {
@@ -38,6 +38,8 @@ impl<T: DataProvider + Default> Server<T> {
             .expect(&format!("Error binding {}", binding));
 
         info!("Skope listening on {}", binding);
-        self.data_provider.main_loop(listener).await;
+        self.data_provider.main_loop(listener).await.unwrap_or_else(|e|{
+            error!(%e, "Establishing the connection");
+        })
     }
 }

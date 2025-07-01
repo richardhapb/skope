@@ -2,10 +2,13 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
 };
-use std::{error::Error, sync::mpsc::{sync_channel, SyncSender}};
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Display,
+};
+use std::{
+    error::Error,
+    sync::mpsc::{SyncSender, sync_channel},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -14,8 +17,8 @@ use tracing::{debug, error, trace, warn};
 use crate::{
     ExecAgg,
     analytics::{
-        reports::{ServerWriter, ReportWriter},
-        requests::ExecAggDiff,
+        reports::{ReportWriter, ServerWriter},
+        requests::{DataComparator, ExecAggDiff},
     },
 };
 

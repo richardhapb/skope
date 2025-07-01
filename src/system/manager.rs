@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
+/// Handle the data for system resources
 pub trait SystemCapturer {
     fn capture(&mut self);
-    fn compare(&self) -> Self;
+    fn compare(&self, other: &Self) -> Self;
 }
 
 /// Manage the resources of the system, like memory or CPU
@@ -37,11 +38,10 @@ impl SystemCapturer for SystemManager {
 
     /// Compare the current system status with the initial,
     /// return a new [`SystemManager`] with the difference
-    fn compare(&self) -> Self {
-        let new = Self::default();
+    fn compare(&self, other: &Self) -> Self {
         Self {
-            memory_usage: new.memory_usage - self.memory_usage,
-            cpu_usage: new.cpu_usage - self.cpu_usage,
+            memory_usage: other.memory_usage - self.memory_usage,
+            cpu_usage: other.cpu_usage - self.cpu_usage,
         }
     }
 }

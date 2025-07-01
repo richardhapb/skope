@@ -1,10 +1,38 @@
+use crate::analytics::reports::Reportable;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::system::manager::SystemManager;
+use crate::system::manager::{SystemCapturer, SystemManager};
+
+pub trait DataComparator: DeserializeOwned {
+    type Diff;
+    fn compare(&self, other: &Self) -> Self::Diff;
+
+    /// Compare two files and return a Result wrapping an [`ExecAggDiff`] containing the differences between them
+    fn compare_files(&self, filename1: &str, filename2: &str) -> std::io::Result<Self::Diff> {
+        // Ensures the extension
+        let filename1 = ensure_extension(filename1, "json");
+        let filename2 = ensure_extension(filename2, "json");
+
+        let mut file1 = std::fs::File::open(filename1)?;
+        let mut file2 = std::fs::File::open(filename2)?;
+
+        let mut str1 = String::new();
+        let mut str2 = String::new();
+
+        file1.read_to_string(&mut str1)?;
+        file2.read_to_string(&mut str2)?;
+
+        let data1 = serde_json::from_str::<Self>(&str1)?;
+        let data2 = serde_json::from_str::<Self>(&str2)?;
+
+        Ok(data1.compare(&data2))
+    }
+}
 
 /// Store a unit of execution bench
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
@@ -33,6 +61,30 @@ impl ExecData {
             system_manager: SystemManager::default(),
             exec_time: 0.0,
         }
+    }
+}
+
+impl DataComparator for ExecData {
+    type Diff = Self;
+    fn compare(&self, other: &Self) -> Self::Diff {
+        Self {
+            name: self.name.clone(),
+            module: self.module.clone(),
+            timestamp: other.timestamp,
+            exec_memory_usage: other.exec_memory_usage - self.exec_memory_usage,
+            system_manager: self.system_manager.compare(&other.system_manager),
+            exec_time: other.exec_time - self.exec_time,
+        }
+    }
+}
+
+impl ExecData {
+    pub fn generate_start_path(&self) -> String {
+        format!("{}_start.json", self.default_path())
+    }
+
+    pub fn generate_stop_path(&self) -> String {
+        format!("{}_stop.json", self.default_path())
     }
 }
 
@@ -105,30 +157,10 @@ pub struct ExecAgg {
     pub agg_data: HashMap<String, AggData>,
 }
 
-impl ExecAgg {
-    /// Compare two files and return a Result wrapping an [`ExecAggDiff`] containing the differences between them
-    pub fn compare_files(&self, filename1: &str, filename2: &str) -> std::io::Result<ExecAggDiff> {
-        // Ensures the extension
-        let filename1 = ensure_extension(filename1, "json");
-        let filename2 = ensure_extension(filename2, "json");
-
-        let mut file1 = std::fs::File::open(filename1)?;
-        let mut file2 = std::fs::File::open(filename2)?;
-
-        let mut str1 = String::new();
-        let mut str2 = String::new();
-
-        file1.read_to_string(&mut str1)?;
-        file2.read_to_string(&mut str2)?;
-
-        let data1 = serde_json::from_str::<ExecAgg>(&str1)?;
-        let data2 = serde_json::from_str::<ExecAgg>(&str2)?;
-
-        Ok(data1.compare(&data2))
-    }
-
+impl DataComparator for ExecAgg {
+    type Diff = ExecAggDiff;
     /// Compare two maps and return an [`ExecAggDiff`] representing the difference.
-    pub fn compare(&self, other: &ExecAgg) -> ExecAggDiff {
+    fn compare(&self, other: &Self) -> Self::Diff {
         let mut exec_agg = ExecAgg::default();
         let mut missed: Vec<String> = vec![];
         let mut exclusive: Vec<String> = vec![];

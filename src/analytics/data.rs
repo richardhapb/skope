@@ -1,21 +1,28 @@
+use crate::analytics::requests::DataComparator;
+use crate::system::manager::SystemCapturer;
+
 use super::reports::{ReportWriter, Reportable, RunnerWriter, ServerWriter};
 use super::requests::{AggData, ExecAgg, ExecData};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 pub trait DataProvider {
-    async fn main_loop(self, listener: TcpListener);
+    async fn main_loop(
+        self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn handle_client(
-        &self,
+        &mut self,
         socket: TcpStream,
         addr: SocketAddr,
     ) -> impl Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send;
+    fn should_close_connection(&self) -> bool;
 }
 
 /// Receive and process the data in Server mode
@@ -43,7 +50,10 @@ impl Default for ServerReceiver {
 
 impl DataProvider for ServerReceiver {
     /// Handle the main loop that receives connections.
-    async fn main_loop(self, listener: TcpListener) {
+    async fn main_loop(
+        self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let max_connections = Arc::new(tokio::sync::Semaphore::new(500)); // Limit to 500 concurrent connections
 
         tokio::spawn(async move {
@@ -55,7 +65,7 @@ impl DataProvider for ServerReceiver {
                     Ok((socket, addr)) => {
                         info!("Client connected: {}", addr);
 
-                        let server_for_client_task = self.clone();
+                        let mut server_for_client_task = self.clone();
 
                         tokio::spawn(async move {
                             // The permit is dropped when this task completes
@@ -77,11 +87,12 @@ impl DataProvider for ServerReceiver {
                 }
             }
         });
+        Ok(())
     }
 
     /// Handle a client connection with the provided data
     async fn handle_client(
-        &self,
+        &mut self,
         mut socket: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -156,6 +167,10 @@ impl DataProvider for ServerReceiver {
             }
         }
     }
+
+    fn should_close_connection(&self) -> bool {
+        todo!()
+    }
 }
 
 impl ServerReceiver {
@@ -166,7 +181,7 @@ impl ServerReceiver {
         }
     }
 
-    /// Process the data prvided by the client
+    /// Process the data provided by the client
     pub async fn process_data(
         &self,
         parsed: ExecData,
@@ -194,17 +209,100 @@ impl ServerReceiver {
 pub struct RunnerReceiver<T: ReportWriter> {
     pub exec_data: ExecData,
     pub report_writer: T,
+    pub should_close: AtomicBool,
+    pub capturing: AtomicBool,
 }
 
-// TODO: IMPLEMENT THIS
 impl DataProvider for RunnerReceiver<RunnerWriter> {
-    async fn main_loop(self, listener: TcpListener) {}
+    async fn main_loop(
+        mut self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        loop {
+            match listener.accept().await {
+                Ok((socket, addr)) => {
+                    info!("Client connected: {}", addr);
+                    self.handle_client(socket, addr).await?;
+                    if self.should_close_connection() {
+                        let filename1 = self.exec_data.generate_start_path();
+                        let filename2 = self.exec_data.generate_stop_path();
+
+                        // Calculate the difference and generate the final report
+                        let diff = self.exec_data.compare_files(&filename1, &filename2)?;
+                        self.report_writer.generate_report(&diff, None)?;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!(%e, "error connecting");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     async fn handle_client(
-        &self,
-        socket: TcpStream,
+        &mut self,
+        mut socket: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            match socket.read(&mut buf).await {
+                Ok(0) => {
+                    info!(%addr, "Closing the connection");
+                    break;
+                }
+                Ok(n) => {
+                    debug!(%n, "Captured request");
+                    if buf.starts_with(b"GET /start") {
+                        // Skip if it is capturing
+                        if self.capturing.swap(true, Ordering::AcqRel) {
+                            warn!("Attempting to start a capture that is already in progress");
+                            println!("The capture has started; skipping the request.");
+                            continue;
+                        }
+
+                        // First capture
+                        self.exec_data.system_manager.capture();
+                        self.report_writer.generate_report(
+                            &self.exec_data,
+                            Some(&self.exec_data.generate_start_path()),
+                        )?;
+                    }
+
+                    if buf.starts_with(b"GET /stop") {
+                        // If not capturing, request to start the capturing
+                        if !self.capturing.swap(false, Ordering::AcqRel) {
+                            error!("Attempting to stop a capture without start it");
+                            println!("No capture has started; please start one first.");
+                            continue;
+                        }
+
+                        // Generate the report and close the connection
+                        self.exec_data.system_manager.capture();
+                        self.report_writer.generate_report(
+                            &self.exec_data,
+                            Some(&self.exec_data.generate_stop_path()),
+                        )?;
+                        self.should_close.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Error reading request: {}", e);
+                    return Err(Box::new(e));
+                }
+            }
+            self.report_writer
+                .generate_report(&self.exec_data, Some(&self.exec_data.name))?;
+            self.exec_data.system_manager.capture();
+        }
         Ok(())
+    }
+
+    fn should_close_connection(&self) -> bool {
+        self.should_close.load(Ordering::Relaxed)
     }
 }
 
@@ -221,6 +319,8 @@ impl<T: ReportWriter> RunnerReceiver<T> {
         Self {
             exec_data: ExecData::from_system_data(name),
             report_writer,
+            should_close: AtomicBool::new(false),
+            capturing: AtomicBool::new(false),
         }
     }
 }

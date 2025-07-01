@@ -21,6 +21,16 @@ impl Reportable for ExecAgg {
     }
 }
 
+impl Reportable for ExecData {
+    fn default_path(&self) -> String {
+        format!("reports/{}", self.name)
+    }
+
+    fn report_data(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
 impl Reportable for Vec<ExecData> {
     fn default_path(&self) -> String {
         "reports/report_apps.json".into()

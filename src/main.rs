@@ -11,7 +11,6 @@ use cli::Commands;
 use runner::cli::BashExecutor;
 use runner::cli::BashScript;
 use runner::cli::ScriptExecutor;
-use std::process::Command;
 use tracing::info;
 
 use tracing::debug;
