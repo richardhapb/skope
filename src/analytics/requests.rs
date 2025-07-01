@@ -1,32 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::sync::Arc;
-use std::{collections::HashMap, hash::Hash};
+use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Default)]
-pub enum RequestType {
-    HttpRequest,
-    #[default]
-    Function,
-    CodeBlock,
-}
-
+/// Store a unit of execution bench
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct ExecData {
-    pub exec_type: RequestType,
     pub name: String,
-    pub module: String,
+    pub module: Option<String>,
     pub timestamp: f32,
     pub exec_memory_usage: f32,
     pub total_memory_global: f32,
     pub exec_time: f32,
-}
-
-impl Hash for ExecData {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-    }
 }
 
 impl PartialEq for ExecData {
@@ -35,8 +21,7 @@ impl PartialEq for ExecData {
     }
 }
 
-impl Eq for ExecData {}
-
+/// Store multiple executions grouped by name
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 pub struct AggData {
     pub name: String,
@@ -48,6 +33,7 @@ pub struct AggData {
 }
 
 impl AggData {
+    /// Update the aggregate data with the new execution data
     pub async fn update(exec_data: &ExecData, exec_agg: Arc<RwLock<ExecAgg>>) -> Self {
         let safe_name = to_safe_name(&exec_data.name);
 
@@ -77,6 +63,7 @@ impl AggData {
         }
     }
 
+    /// Compare two aggregates and return a new one with the differences
     pub fn difference(&self, other: &Self) -> Self {
         let safe_name = to_safe_name(&self.name);
 
@@ -97,12 +84,14 @@ impl AggData {
     }
 }
 
+/// A map containing all the aggregated data by name
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ExecAgg {
     pub agg_data: HashMap<String, AggData>,
 }
 
 impl ExecAgg {
+    /// Compare two files and return a Result wrapping an [`ExecAggDiff`] containing the differences between them
     pub fn compare_files(&self, filename1: &str, filename2: &str) -> std::io::Result<ExecAggDiff> {
         // Ensures the extension
         let filename1 = ensure_extension(filename1, "json");
@@ -123,6 +112,7 @@ impl ExecAgg {
         Ok(data1.compare(&data2))
     }
 
+    /// Compare two maps and return an [`ExecAggDiff`] representing the difference.
     pub fn compare(&self, other: &ExecAgg) -> ExecAggDiff {
         let mut exec_agg = ExecAgg::default();
         let mut missed: Vec<String> = vec![];
@@ -159,16 +149,19 @@ impl ExecAgg {
     }
 }
 
+/// Represnts the difference between two [`ExecAgg`]
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct ExecAggDiff {
+    /// The difference between both data sets.
     pub exec_agg: ExecAgg,
-    // The apps that only has the first [`ExecAgg`] instance
+    /// The apps that only has the first [`ExecAgg`] instance
     pub exclusive: Vec<String>,
-    // The apps missing for the first [`ExecAgg`]
+    /// The apps missing for the first [`ExecAgg`]
     pub missed: Vec<String>,
 }
 
+/// Ensure the file has the expected extension; if not, add it.
 fn ensure_extension(filename: &str, extension: &str) -> String {
     if filename.ends_with(extension) {
         filename.to_string()
@@ -177,6 +170,7 @@ fn ensure_extension(filename: &str, extension: &str) -> String {
     }
 }
 
+/// Transform the app name to a safe format for storage
 fn to_safe_name(name: &str) -> String {
     name.replace("/", "-")
         .replace("?", "x")
