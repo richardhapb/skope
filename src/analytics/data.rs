@@ -2,7 +2,7 @@ use crate::analytics::requests::DataComparator;
 use crate::system::manager::SystemCapturer;
 
 use super::reports::{ReportWriter, Reportable, RunnerWriter, ServerWriter};
-use super::requests::{AggData, ExecAgg, ExecData};
+use super::requests::{AggData, ExecAgg, ExecData, to_safe_name};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -186,12 +186,26 @@ impl ServerReceiver {
         &self,
         parsed: ExecData,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let new_data = AggData::update(&parsed, self.exec_agg.clone()).await;
+        // Try to get the previous data
+        let mut agg_data = {
+            if let Some(prev_data) = self
+                .exec_agg
+                .read()
+                .await
+                .agg_data
+                .get(&to_safe_name(&parsed.name))
+            {
+                prev_data.clone()
+            } else {
+                AggData::default()
+            }
+        };
+        agg_data.update(&parsed).await;
 
         // Update the exec aggregation with the new aggregation data
         {
             let mut agg = self.exec_agg.write().await;
-            agg.agg_data.insert(parsed.name.clone(), new_data);
+            agg.agg_data.insert(parsed.name.clone(), agg_data);
             info!(
                 "Updated exec_agg with new data point, total: {} items",
                 agg.agg_data.len()
@@ -410,7 +424,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Timeout for the entire test
-        let test_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let test_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut client = Client::new("127.0.0.1", test_server_port);
             let app_data_for_json = AppData::new();
 

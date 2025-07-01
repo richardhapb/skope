@@ -11,9 +11,9 @@ pub trait SystemCapturer {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct SystemManager {
     /// Memory usage in MB
-    memory_usage: f32,
+    pub memory_usage: f32,
     /// CPU % usage
-    cpu_usage: f32,
+    pub cpu_usage: f32,
 }
 
 impl Default for SystemManager {
@@ -32,7 +32,7 @@ impl SystemCapturer for SystemManager {
     fn capture(&mut self) {
         let sys = System::new_all();
 
-        self.memory_usage = sys.used_memory() as f32 / 1024.0;
+        self.memory_usage = sys.used_memory() as f32 / 1024.0_f32.powi(2);
         self.cpu_usage = sys.global_cpu_usage();
     }
 

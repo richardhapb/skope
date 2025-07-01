@@ -3,8 +3,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::system::manager::{SystemCapturer, SystemManager};
 
@@ -40,7 +38,6 @@ pub struct ExecData {
     pub name: String,
     pub module: Option<String>,
     pub timestamp: i64,
-    pub exec_memory_usage: f32,
     pub system_manager: SystemManager,
     pub exec_time: f32,
 }
@@ -57,7 +54,6 @@ impl ExecData {
             name: name.into(),
             module: None,
             timestamp: chrono::Local::now().timestamp(),
-            exec_memory_usage: 0.0,
             system_manager: SystemManager::default(),
             exec_time: 0.0,
         }
@@ -71,7 +67,6 @@ impl DataComparator for ExecData {
             name: self.name.clone(),
             module: self.module.clone(),
             timestamp: other.timestamp,
-            exec_memory_usage: other.exec_memory_usage - self.exec_memory_usage,
             system_manager: self.system_manager.compare(&other.system_manager),
             exec_time: other.exec_time - self.exec_time,
         }
@@ -101,33 +96,18 @@ pub struct AggData {
 
 impl AggData {
     /// Update the aggregate data with the new execution data
-    pub async fn update(exec_data: &ExecData, exec_agg: Arc<RwLock<ExecAgg>>) -> Self {
+    pub async fn update(&mut self, exec_data: &ExecData) {
         let safe_name = to_safe_name(&exec_data.name);
+        let total_memory_usage = self.total_memory_usage + exec_data.system_manager.memory_usage;
+        let total_exec_time = self.total_exec_time + exec_data.exec_time;
+        let total_execs = self.total_execs + 1;
 
-        let prev_data = {
-            let agg = exec_agg.read().await;
-            agg.agg_data.get(&exec_data.name).cloned()
-        };
-
-        let mut total_exec_time = exec_data.exec_time;
-        let mut total_memory_usage = exec_data.exec_memory_usage;
-        let mut total_execs = 1; // current
-
-        // If exists data, use it
-        if let Some(prev_data) = prev_data {
-            total_exec_time = prev_data.total_exec_time + exec_data.exec_time;
-            total_memory_usage = prev_data.total_memory_usage + exec_data.exec_memory_usage;
-            total_execs = prev_data.total_execs + 1;
-        }
-
-        Self {
-            name: safe_name,
-            total_execs,
-            total_memory_usage,
-            total_exec_time,
-            avg_exec_time: total_exec_time / total_execs as f32,
-            avg_exec_memory: total_memory_usage / total_execs as f32,
-        }
+        self.name = safe_name;
+        self.total_execs = total_execs;
+        self.total_memory_usage = total_memory_usage;
+        self.total_exec_time = total_exec_time;
+        self.avg_exec_time = total_exec_time / total_execs as f32;
+        self.avg_exec_memory = total_memory_usage / total_execs as f32;
     }
 
     /// Compare two aggregates and return a new one with the differences
@@ -218,7 +198,7 @@ fn ensure_extension(filename: &str, extension: &str) -> String {
 }
 
 /// Transform the app name to a safe format for storage
-fn to_safe_name(name: &str) -> String {
+pub fn to_safe_name(name: &str) -> String {
     name.replace("/", "-")
         .replace("?", "x")
         .replace("\\", "_")
@@ -263,26 +243,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_update() {
-        let mut agg1 = AggData::default();
-
+        let mut agg = AggData::default();
         let mut exec_data = ExecData::default();
-        let mut exec_agg = ExecAgg::default();
 
         exec_data.name = "test".to_string();
         exec_data.exec_time = 10.0;
-        exec_data.exec_memory_usage = 20.0;
+        exec_data.system_manager.memory_usage = 20.0;
 
-        agg1.name = "test".to_string();
-        agg1.total_exec_time = 100.0;
-        agg1.total_memory_usage = 200.0;
+        agg.name = "test".to_string();
+        agg.total_exec_time = 100.0;
+        agg.total_memory_usage = 200.0;
 
-        exec_agg.agg_data.insert("test".to_string(), agg1);
+        agg.update(&exec_data).await;
 
-        let result = AggData::update(&exec_data, Arc::new(RwLock::new(exec_agg))).await;
-
-        assert_eq!(result.name, "test");
-        assert_eq!(result.total_memory_usage, 220.0);
-        assert_eq!(result.total_exec_time, 110.0);
+        assert_eq!(agg.name, "test");
+        assert_eq!(agg.total_memory_usage, 220.0);
+        assert_eq!(agg.total_exec_time, 110.0);
     }
 
     #[test]
