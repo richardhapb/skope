@@ -15,7 +15,7 @@ pub trait Reportable: Sync + Send {
 
 impl Reportable for ExecAgg {
     fn default_path(&self) -> String {
-        format!("{}/report_agg.json",REPORTS_PATH)
+        format!("{}/report_agg.json", REPORTS_PATH)
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -47,11 +47,7 @@ impl Reportable for Vec<ExecData> {
 pub trait ReportWriter: Send + Sync + Debug {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()>;
 
-    fn generate_report(
-        &self,
-        reportable: &dyn Reportable,
-        path: Option<&str>,
-    ) -> std::io::Result<()> {
+    fn generate_report(&self, reportable: &dyn Reportable, path: Option<&str>) -> std::io::Result<()> {
         if !fs::metadata(REPORTS_PATH).is_ok() {
             fs::create_dir(REPORTS_PATH)?;
         }
@@ -111,6 +107,8 @@ impl ReportWriter for RunnerWriter {
 
 impl RunnerWriter {
     pub fn new(name: &str) -> Self {
-        Self { report_name: name.to_string() }
+        Self {
+            report_name: name.to_string(),
+        }
     }
 }

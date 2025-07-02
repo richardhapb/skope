@@ -136,23 +136,13 @@ impl ExecData {
             ("Name", format!("{}", self.name)),
             ("Module", self.module.clone().unwrap_or("[N/A]".into())),
             ("Timestamp", self.timestamp.to_string()),
-            (
-                "Memory Usage",
-                format!("{:.2}", self.system_manager.memory_usage),
-            ),
-            (
-                "CPU Usage (%)",
-                format!("{:.2}", self.system_manager.cpu_usage),
-            ),
+            ("Memory Usage", format!("{:.2}", self.system_manager.memory_usage)),
+            ("CPU Usage (%)", format!("{:.2}", self.system_manager.cpu_usage)),
             ("Exec Time (Sec)", format!("{:.2}", self.exec_time)),
         ];
 
         // Determine the maximum length of the field names
-        let max_field_name_len = fields
-            .iter()
-            .map(|(name, _value)| name.len())
-            .max()
-            .unwrap_or(0);
+        let max_field_name_len = fields.iter().map(|(name, _value)| name.len()).max().unwrap_or(0);
 
         // Print each field
         for (field_name, field_value) in fields {
@@ -173,13 +163,9 @@ impl ExecData {
                 display_value.truncate(available_value_width.saturating_sub(3));
                 display_value.push_str("...");
             }
-            let value_padding =
-                " ".repeat(available_value_width.saturating_sub(display_value.len()));
+            let value_padding = " ".repeat(available_value_width.saturating_sub(display_value.len()));
 
-            println!(
-                "{}{} | {}{}",
-                field_name, name_padding, display_value, value_padding
-            );
+            println!("{}{} | {}{}", field_name, name_padding, display_value, value_padding);
         }
 
         println!("{}", top_bottom);
@@ -445,15 +431,13 @@ mod tests {
         data1.system_manager.cpu_usage = 50.0;
         data2.system_manager.cpu_usage = 80.0;
 
-        data1.timestamp =
-            chrono::DateTime::parse_from_str("2025-05-01 9:00 +0000", "%Y-%m-%d %H:%M %z")
-                .unwrap()
-                .timestamp();
+        data1.timestamp = chrono::DateTime::parse_from_str("2025-05-01 9:00 +0000", "%Y-%m-%d %H:%M %z")
+            .unwrap()
+            .timestamp();
 
-        let expected_time =
-            chrono::DateTime::parse_from_str("2025-05-02 11:00 +0000", "%Y-%m-%d %H:%M %z")
-                .unwrap()
-                .timestamp();
+        let expected_time = chrono::DateTime::parse_from_str("2025-05-02 11:00 +0000", "%Y-%m-%d %H:%M %z")
+            .unwrap()
+            .timestamp();
 
         data2.timestamp = expected_time;
         let diff = data1.compare(&data2);

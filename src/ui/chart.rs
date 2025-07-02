@@ -53,9 +53,7 @@ impl Widget for &Chart {
         Self: Sized,
     {
         let title = Line::from(format!("{}", self.metric_type)).bold();
-        let block = Block::bordered()
-            .title(title.centered())
-            .border_set(border::ROUNDED);
+        let block = Block::bordered().title(title.centered()).border_set(border::ROUNDED);
 
         // Create a block-sized area within the component
         let inner_area = block.inner(area);
@@ -70,11 +68,9 @@ impl Widget for &Chart {
         .split(inner_area);
 
         // Label for the x-axis
-        Paragraph::new(Text::from(vec![Line::from(
-            "Applications".to_string().yellow(),
-        )]))
-        .centered()
-        .render(inner_layout[1], buf);
+        Paragraph::new(Text::from(vec![Line::from("Applications".to_string().yellow())]))
+            .centered()
+            .render(inner_layout[1], buf);
 
         let gap: u16 = 2; // gap between bars
 
@@ -245,10 +241,7 @@ impl Chart {
 
             // If text is bigger than max, break line
             if name_clone.len() > bar.width.into() {
-                let mut last_line = name_clone
-                    .get(bar.width as usize..)
-                    .unwrap_or("")
-                    .to_string();
+                let mut last_line = name_clone.get(bar.width as usize..).unwrap_or("").to_string();
                 last_line.truncate(bar.width.into());
                 let name_rect = Rect::new(bar.x, bar.y + bar.height + 1, bar.width, 1);
                 Paragraph::new(Line::from(last_line).red().centered()).render(name_rect, buf);
@@ -291,13 +284,7 @@ impl Chart {
         }
     }
 
-    fn resolve_height(
-        &self,
-        val: f32,
-        max_val: f32,
-        min_val: f32,
-        inner_layout: &Rc<[Rect]>,
-    ) -> u16 {
+    fn resolve_height(&self, val: f32, max_val: f32, min_val: f32, inner_layout: &Rc<[Rect]>) -> u16 {
         let available_height = if min_val < 0.0 {
             // Calculate available height (half the space for negative values)
             inner_layout[0].height as f32 / 2.0 * 0.7
@@ -318,9 +305,7 @@ impl Chart {
             };
             let height_f32 = proportion * available_height;
 
-            return (height_f32.round() as u16)
-                .max(1)
-                .min(inner_layout[0].height / 2);
+            return (height_f32.round() as u16).max(1).min(inner_layout[0].height / 2);
         }
 
         // Positive values

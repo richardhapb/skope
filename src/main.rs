@@ -62,8 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Server => {
             let report_writer = Arc::new(ServerWriter::new());
             let data_provider = ServerReceiver::new(report_writer);
-            let server: Server<ServerReceiver> =
-                Server::new(host, port.parse().unwrap(), data_provider);
+            let server: Server<ServerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
             let exec_agg_ref = server.data_provider.exec_agg.clone();
 
             debug!("Initialized with empty aggregation data");
@@ -82,8 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Runner { script, tag } => {
             let report_writer = RunnerWriter::new(&tag);
             let data_provider = RunnerReceiver::new(&tag, Box::new(report_writer));
-            let server: Server<RunnerReceiver> =
-                Server::new(host, port.parse().unwrap(), data_provider);
+            let server: Server<RunnerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
             let script = BashScript::new(&script);
             println!("Executing script: {}", script.path);
             BashExecutor::execute(script).await.unwrap_or_else(|e| {

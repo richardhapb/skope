@@ -49,10 +49,7 @@ impl App {
 
         Self {
             current_page: Page::First((MetricType::TotalExecTime, MetricType::TotalMemoryUsage)),
-            next_page: Some(Page::Second((
-                MetricType::TotalExecCount,
-                MetricType::TimeAverage,
-            ))),
+            next_page: Some(Page::Second((MetricType::TotalExecCount, MetricType::TimeAverage))),
             metrics_order,
             prev_page: None,
             current_view,
@@ -188,9 +185,7 @@ impl App {
             match event::read()? {
                 // it's important to check that the event is a key press event as
                 // crossterm also emits key release and repeat events on Windows.
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)?
-                }
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => self.handle_key_event(key_event)?,
                 _ => {}
             };
         }
@@ -294,9 +289,7 @@ impl App {
             let report_writer = self.report_writer.clone();
             tokio::spawn(async move {
                 let exec_agg = { exec_agg_ref.read().await.clone() };
-                if let Err(e) =
-                    report_writer.generate_report(&exec_agg, Some(&new_capture_filename))
-                {
+                if let Err(e) = report_writer.generate_report(&exec_agg, Some(&new_capture_filename)) {
                     error!(%e, "Error capturing file; skipping data clearance.");
                     return;
                 }
@@ -335,9 +328,7 @@ impl App {
 
     fn change_page(&mut self, offset: i16, subsequent_page: Option<Page>) {
         // Early return if trying to go beyond boundaries
-        if (offset < 0 && self.prev_page.is_none())
-            || (offset > 0 && self.next_page.is_none() || offset == 0)
-        {
+        if (offset < 0 && self.prev_page.is_none()) || (offset > 0 && self.next_page.is_none() || offset == 0) {
             return;
         }
 
@@ -489,14 +480,7 @@ mod tests {
                 Page::DiffView((m1, _)) => vec![MetricType::DiffView(Box::new(m1))],
             };
 
-            for (i, chart) in app
-                .rendering_queue
-                .pop_front()
-                .unwrap()
-                .charts
-                .iter()
-                .enumerate()
-            {
+            for (i, chart) in app.rendering_queue.pop_front().unwrap().charts.iter().enumerate() {
                 assert_eq!(chart.metric_type, charts[i]);
             }
         }

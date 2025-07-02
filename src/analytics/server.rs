@@ -39,7 +39,7 @@ impl<T: DataProvider + Default> Server<T> {
             .expect(&format!("Error binding {}", binding));
 
         info!("Skope listening on {}", binding);
-        self.data_provider.main_loop(listener).await.unwrap_or_else(|e|{
+        self.data_provider.main_loop(listener).await.unwrap_or_else(|e| {
             error!(%e, "Error wstablishing the connection");
             eprintln!("Error: {}", e);
             std::process::exit(1);

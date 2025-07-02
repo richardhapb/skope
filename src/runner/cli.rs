@@ -1,6 +1,6 @@
 use std::error::Error;
 use tokio::process::Command;
-use tracing::{info, error, warn};
+use tracing::{error, info, warn};
 
 pub trait Executable {
     fn get_location(&self) -> &str;
@@ -12,9 +12,7 @@ pub struct BashScript {
 
 impl BashScript {
     pub fn new(path: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-        }
+        Self { path: path.into() }
     }
 }
 
@@ -42,11 +40,7 @@ impl ScriptExecutor for BashExecutor {
         // Spawn a new asynchronous task that will execute the bash command.
         // This task will run independently in the background.
         tokio::spawn(async move {
-            let output = Command::new("bash")
-                .arg("-c")
-                .arg(&content)
-                .output()
-                .await; // Await the script's completion within this spawned task
+            let output = Command::new("bash").arg("-c").arg(&content).output().await; // Await the script's completion within this spawned task
 
             match output {
                 Ok(output) => {

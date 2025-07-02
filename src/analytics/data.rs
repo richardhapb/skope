@@ -13,10 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
 
 pub trait DataProvider {
-    async fn main_loop(
-        self,
-        listener: TcpListener,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn main_loop(self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     async fn handle_client(
         &mut self,
         socket: TcpStream,
@@ -50,10 +47,7 @@ impl Default for ServerReceiver {
 
 impl DataProvider for ServerReceiver {
     /// Handle the main loop that receives connections.
-    async fn main_loop(
-        self,
-        listener: TcpListener,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn main_loop(self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let max_connections = Arc::new(tokio::sync::Semaphore::new(500)); // Limit to 500 concurrent connections
 
         tokio::spawn(async move {
@@ -71,8 +65,7 @@ impl DataProvider for ServerReceiver {
                             // The permit is dropped when this task completes
                             let _permit = permit;
 
-                            if let Err(e) = server_for_client_task.handle_client(socket, addr).await
-                            {
+                            if let Err(e) = server_for_client_task.handle_client(socket, addr).await {
                                 error!(%e, "Error handling client");
                             }
                         });
@@ -183,19 +176,10 @@ impl ServerReceiver {
     }
 
     /// Process the data provided by the client
-    pub async fn process_data(
-        &self,
-        parsed: ExecData,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn process_data(&self, parsed: ExecData) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Try to get the previous data
         let mut agg_data = {
-            if let Some(prev_data) = self
-                .exec_agg
-                .read()
-                .await
-                .agg_data
-                .get(&to_safe_name(&parsed.name))
-            {
+            if let Some(prev_data) = self.exec_agg.read().await.agg_data.get(&to_safe_name(&parsed.name)) {
                 prev_data.clone()
             } else {
                 AggData::default()
@@ -229,10 +213,7 @@ pub struct RunnerReceiver {
 }
 
 impl DataProvider for RunnerReceiver {
-    async fn main_loop(
-        mut self,
-        listener: TcpListener,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn main_loop(mut self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
             match listener.accept().await {
                 Ok((socket, addr)) => {
@@ -246,10 +227,7 @@ impl DataProvider for RunnerReceiver {
                         // Calculate the difference and generate the final report
                         let diff = self.exec_data.compare_files(&filename1, &filename2)?;
                         self.report_writer.generate_report(&diff, None)?;
-                        println!(
-                            "Capture finished successfully, written in {}",
-                            diff.default_path()
-                        );
+                        println!("Capture finished successfully, written in {}", diff.default_path());
                         break;
                     }
                 }
@@ -287,10 +265,8 @@ impl DataProvider for RunnerReceiver {
 
                     // First capture
                     self.exec_data.system_manager.capture();
-                    self.report_writer.generate_report(
-                        &self.exec_data,
-                        Some(&self.exec_data.generate_start_path()),
-                    )?;
+                    self.report_writer
+                        .generate_report(&self.exec_data, Some(&self.exec_data.generate_start_path()))?;
                     return Ok(());
                 }
 
@@ -305,16 +281,17 @@ impl DataProvider for RunnerReceiver {
                     // Generate the report and close the connection
                     self.exec_data.capture_elapsed_time();
                     self.exec_data.system_manager.capture();
-                    self.report_writer.generate_report(
-                        &self.exec_data,
-                        Some(&self.exec_data.generate_stop_path()),
-                    )?;
+                    self.report_writer
+                        .generate_report(&self.exec_data, Some(&self.exec_data.generate_stop_path()))?;
                     self.should_close.store(true, Ordering::Release);
                     return Ok(());
                 }
 
                 // Unknown request
-                println!("Unknown request: {:?}", String::from_utf8_lossy(&buf));
+                println!(
+                    "Unknown request: {:?}",
+                    String::from_utf8_lossy(&buf).split_once("\r\n").unwrap_or(("", "")).0
+                );
             }
             Err(e) => {
                 error!("Error reading request: {}", e);
@@ -389,11 +366,7 @@ mod tests {
             Ok(())
         }
 
-        fn generate_report(
-            &self,
-            _reportable: &dyn Reportable,
-            _path: Option<&str>,
-        ) -> std::io::Result<()> {
+        fn generate_report(&self, _reportable: &dyn Reportable, _path: Option<&str>) -> std::io::Result<()> {
             self.generated_flag.store(true, Ordering::SeqCst);
             self.reports_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -418,8 +391,8 @@ mod tests {
 
     impl Client {
         fn new(server_host: &str, server_port: u16) -> Self {
-            let stream = TcpStream::connect(format!("{}:{}", server_host, server_port))
-                .expect("Failed to connect to server");
+            let stream =
+                TcpStream::connect(format!("{}:{}", server_host, server_port)).expect("Failed to connect to server");
             Self { stream }
         }
     }
@@ -434,8 +407,7 @@ mod tests {
         let report_writer = Arc::new(report_writer_mock);
         let data_provider = ServerReceiver::new(report_writer);
 
-        let server: Server<ServerReceiver> =
-            Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
+        let server: Server<ServerReceiver> = Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
         let server_handle = tokio::spawn(async move {
             server.init_connection().await;
         });
@@ -456,10 +428,7 @@ mod tests {
                 client.stream.write_all(json_data.as_bytes())?;
                 client.stream.flush()?;
 
-                assert!(
-                    !generated_flag.load(Ordering::SeqCst),
-                    "Report generated early"
-                );
+                assert!(!generated_flag.load(Ordering::SeqCst), "Report generated early");
 
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -474,10 +443,7 @@ mod tests {
 
         assert!(test_result.is_ok(), "Test timed out");
         assert_eq!(reports_count.load(Ordering::Acquire), 1);
-        assert!(
-            generated_flag.load(Ordering::SeqCst),
-            "Report was not generated"
-        );
+        assert!(generated_flag.load(Ordering::SeqCst), "Report was not generated");
     }
 
     #[tokio::test]
@@ -493,11 +459,7 @@ mod tests {
 
         data.exec_data.name = "test_name".to_string();
         data.exec_data.exec_time = 10.0;
-        server
-            .data_provider
-            .process_data(data.exec_data.clone())
-            .await
-            .unwrap();
+        server.data_provider.process_data(data.exec_data.clone()).await.unwrap();
 
         // Should be inserted on aggregate
         assert_eq!(
@@ -513,11 +475,7 @@ mod tests {
             data.exec_data.exec_time
         );
 
-        server
-            .data_provider
-            .process_data(data.exec_data.clone())
-            .await
-            .unwrap();
+        server.data_provider.process_data(data.exec_data.clone()).await.unwrap();
 
         // Should be updated with the double of the value
         assert_eq!(
@@ -560,20 +518,14 @@ mod tests {
         assert!(!capturing.load(Ordering::Relaxed));
 
         let request = b"GET /start";
-        client
-            .stream
-            .write_all(request)
-            .expect("error writing data");
+        client.stream.write_all(request).expect("error writing data");
         client.stream.flush().expect("error flushing");
 
         // Give server time to process the request
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Should BE capturing now
-        assert!(
-            capturing.load(Ordering::Relaxed),
-            "Should be capturing after /start"
-        );
+        assert!(capturing.load(Ordering::Relaxed), "Should be capturing after /start");
         assert!(
             !should_close.load(Ordering::Relaxed),
             "Should not be closing after /start"
@@ -581,10 +533,7 @@ mod tests {
         assert_eq!(reports_count.load(Ordering::Relaxed), 1);
 
         let request = b"GET /stop";
-        client
-            .stream
-            .write_all(request)
-            .expect("error writing data");
+        client.stream.write_all(request).expect("error writing data");
         client.stream.flush().expect("error flushing");
 
         // Give server time to process the request and generate report
@@ -596,10 +545,7 @@ mod tests {
             "Should not be capturing after /stop"
         );
         // Should close connection
-        assert!(
-            should_close.load(Ordering::Relaxed),
-            "Should be closing after /stop"
-        );
+        assert!(should_close.load(Ordering::Relaxed), "Should be closing after /stop");
         assert!(
             generated_flag.load(Ordering::SeqCst),
             "Report should have been generated"
@@ -613,10 +559,6 @@ mod tests {
     // Helper function to find available port
     fn find_available_port() -> u16 {
         use std::net::TcpListener;
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 }
