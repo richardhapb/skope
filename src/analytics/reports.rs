@@ -5,6 +5,8 @@ use std::io::Write;
 use std::ops::Deref;
 use tracing::info;
 
+pub const REPORTS_PATH: &str = ".skope";
+
 /// A reportable data
 pub trait Reportable: Sync + Send {
     fn default_path(&self) -> String;
@@ -13,7 +15,7 @@ pub trait Reportable: Sync + Send {
 
 impl Reportable for ExecAgg {
     fn default_path(&self) -> String {
-        "reports/report_agg.json".into()
+        format!("{}/report_agg.json",REPORTS_PATH)
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -23,7 +25,7 @@ impl Reportable for ExecAgg {
 
 impl Reportable for ExecData {
     fn default_path(&self) -> String {
-        format!("reports/{}", self.name)
+        format!("{}/{}.json", REPORTS_PATH, self.name)
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -33,7 +35,7 @@ impl Reportable for ExecData {
 
 impl Reportable for Vec<ExecData> {
     fn default_path(&self) -> String {
-        "reports/report_apps.json".into()
+        format!("{}/report_apps.json", REPORTS_PATH)
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -50,8 +52,8 @@ pub trait ReportWriter: Send + Sync + Debug {
         reportable: &dyn Reportable,
         path: Option<&str>,
     ) -> std::io::Result<()> {
-        if !fs::metadata("reports").is_ok() {
-            fs::create_dir("reports")?;
+        if !fs::metadata(REPORTS_PATH).is_ok() {
+            fs::create_dir(REPORTS_PATH)?;
         }
         let default_path = &reportable.default_path();
         let report_path = path.unwrap_or(default_path);
@@ -62,13 +64,14 @@ pub trait ReportWriter: Send + Sync + Debug {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         file.write_all(app_data.as_bytes())?;
-        info!(%report_path, "Aggregate report written");
+        info!(%report_path, "Report written");
 
         Ok(())
     }
 }
 
 #[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
 pub struct ServerWriter {
     iterations_threshold: usize,
 }

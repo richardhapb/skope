@@ -84,6 +84,7 @@ impl Display for Page {
 
 /// Contains a complete view in the screen
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 struct View {
     charts: Vec<Chart>,
     exec_agg: Option<Arc<RwLock<ExecAgg>>>,

@@ -246,6 +246,10 @@ impl DataProvider for RunnerReceiver {
                         // Calculate the difference and generate the final report
                         let diff = self.exec_data.compare_files(&filename1, &filename2)?;
                         self.report_writer.generate_report(&diff, None)?;
+                        println!(
+                            "Capture finished successfully, written in {}",
+                            diff.default_path()
+                        );
                         break;
                     }
                 }
@@ -258,63 +262,63 @@ impl DataProvider for RunnerReceiver {
         Ok(())
     }
 
+    /// This is executed once, without a loop. The connection is closed immediately when a
+    /// request is processed
     async fn handle_client(
         &mut self,
         mut socket: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut buf = vec![0u8; 1024];
-        loop {
-            match socket.read(&mut buf).await {
-                Ok(0) => {
-                    info!(%addr, "Closing the connection");
-                    break;
-                }
-                Ok(n) => {
-                    debug!(%n, "Captured request");
-                    if buf.starts_with(b"GET /start") {
-                        // Skip if it is capturing
-                        if self.capturing.swap(true, Ordering::AcqRel) {
-                            warn!("Attempting to start a capture that is already in progress");
-                            println!("The capture has started; skipping the request.");
-                            continue;
-                        }
-
-                        // First capture
-                        self.exec_data.system_manager.capture();
-                        self.report_writer.generate_report(
-                            &self.exec_data,
-                            Some(&self.exec_data.generate_start_path()),
-                        )?;
-                        continue;
+        match socket.read(&mut buf).await {
+            Ok(0) => {
+                info!(%addr, "Closing the connection");
+                return Ok(());
+            }
+            Ok(n) => {
+                debug!(%n, "Captured request");
+                if buf.starts_with(b"GET /start") {
+                    println!("Start signal received, capturing...");
+                    // Skip if it is capturing
+                    if self.capturing.swap(true, Ordering::AcqRel) {
+                        warn!("Attempting to start a capture that is already in progress");
+                        println!("The capture has started; skipping the request.");
                     }
 
-                    if buf.starts_with(b"GET /stop") {
-                        // If not capturing, request to start the capturing
-                        if !self.capturing.swap(false, Ordering::AcqRel) {
-                            error!("Attempting to stop a capture without start it");
-                            println!("No capture has started; please start one first.");
-                            continue;
-                        }
+                    // First capture
+                    self.exec_data.system_manager.capture();
+                    self.report_writer.generate_report(
+                        &self.exec_data,
+                        Some(&self.exec_data.generate_start_path()),
+                    )?;
+                    return Ok(());
+                }
 
-                        // Generate the report and close the connection
-                        self.exec_data.capture_elapsed_time();
-                        self.exec_data.system_manager.capture();
-                        self.report_writer.generate_report(
-                            &self.exec_data,
-                            Some(&self.exec_data.generate_stop_path()),
-                        )?;
-                        self.should_close.store(true, Ordering::Release);
-                        break;
+                if buf.starts_with(b"GET /stop") {
+                    println!("Stop signal received, stopping the capturing...");
+                    // If not capturing, request to start the capturing
+                    if !self.capturing.swap(false, Ordering::AcqRel) {
+                        error!("Attempting to stop a capture without start it");
+                        println!("No capture has started; please start one first.");
                     }
 
-                    // Unknown request
-                    println!("Unknown request: {:?}", String::from_utf8_lossy(&buf));
+                    // Generate the report and close the connection
+                    self.exec_data.capture_elapsed_time();
+                    self.exec_data.system_manager.capture();
+                    self.report_writer.generate_report(
+                        &self.exec_data,
+                        Some(&self.exec_data.generate_stop_path()),
+                    )?;
+                    self.should_close.store(true, Ordering::Release);
+                    return Ok(());
                 }
-                Err(e) => {
-                    error!("Error reading request: {}", e);
-                    return Err(Box::new(e));
-                }
+
+                // Unknown request
+                println!("Unknown request: {:?}", String::from_utf8_lossy(&buf));
+            }
+            Err(e) => {
+                error!("Error reading request: {}", e);
+                return Err(Box::new(e));
             }
         }
         Ok(())
@@ -375,7 +379,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestReportWriter {
         generated_flag: Arc<AtomicBool>,
-        reports_count: Arc<AtomicUsize>
+        reports_count: Arc<AtomicUsize>,
     }
 
     impl ReportWriter for TestReportWriter {
@@ -386,10 +390,10 @@ mod tests {
         }
 
         fn generate_report(
-                &self,
-                _reportable: &dyn Reportable,
-                _path: Option<&str>,
-            ) -> std::io::Result<()> {
+            &self,
+            _reportable: &dyn Reportable,
+            _path: Option<&str>,
+        ) -> std::io::Result<()> {
             self.generated_flag.store(true, Ordering::SeqCst);
             self.reports_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -402,7 +406,7 @@ mod tests {
             let count = Arc::new(AtomicUsize::new(0));
             let writer = Self {
                 generated_flag: Arc::clone(&flag),
-                reports_count: Arc::clone(&count)
+                reports_count: Arc::clone(&count),
             };
             (writer, flag, count)
         }
@@ -420,10 +424,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
     // Test that the report generation threshold is working properly
     // for example, if the threshold is defined as 10, after 10 requests
     // the report should be generated.
+    #[tokio::test]
     async fn test_generate_report() {
         let (report_writer_mock, generated_flag, reports_count) = TestReportWriter::new();
         let test_server_port = find_available_port();
@@ -530,6 +534,10 @@ mod tests {
         );
     }
 
+    // The RunnerReceiver should:
+    // - Generate a report when the start signal is received (HTTP request) and begin capturing.
+    // - Stop capturing when the stop signal is received and generate the stop report.
+    // - Finally, create the report using the stop report and the start report to generate the final report.
     #[tokio::test]
     async fn test_runner_connection() {
         let test_server_port = find_available_port();
@@ -562,8 +570,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Should BE capturing now
-        assert!(capturing.load(Ordering::Relaxed), "Should be capturing after /start");
-        assert!(!should_close.load(Ordering::Relaxed), "Should not be closing after /start");
+        assert!(
+            capturing.load(Ordering::Relaxed),
+            "Should be capturing after /start"
+        );
+        assert!(
+            !should_close.load(Ordering::Relaxed),
+            "Should not be closing after /start"
+        );
         assert_eq!(reports_count.load(Ordering::Relaxed), 1);
 
         let request = b"GET /stop";
@@ -577,10 +591,19 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Should NOT be capturing now (it was swapped to false)
-        assert!(!capturing.load(Ordering::Relaxed), "Should not be capturing after /stop");
+        assert!(
+            !capturing.load(Ordering::Relaxed),
+            "Should not be capturing after /stop"
+        );
         // Should close connection
-        assert!(should_close.load(Ordering::Relaxed), "Should be closing after /stop");
-        assert!(generated_flag.load(Ordering::SeqCst), "Report should have been generated");
+        assert!(
+            should_close.load(Ordering::Relaxed),
+            "Should be closing after /stop"
+        );
+        assert!(
+            generated_flag.load(Ordering::SeqCst),
+            "Report should have been generated"
+        );
         // The two reports and the diff report.
         assert_eq!(reports_count.load(Ordering::Relaxed), 3);
 

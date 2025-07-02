@@ -1,3 +1,5 @@
 /target
 reports
 .DS_Store
+.skope
+runner.sh

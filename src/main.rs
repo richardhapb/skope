@@ -5,6 +5,8 @@ use std::time::Duration;
 use analytics::data::RunnerReceiver;
 use analytics::data::ServerReceiver;
 use analytics::reports::RunnerWriter;
+use analytics::requests::DataComparator;
+use analytics::requests::ExecData;
 use clap::Parser;
 use cli::Cli;
 use cli::Commands;
@@ -83,12 +85,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let server: Server<RunnerReceiver> =
                 Server::new(host, port.parse().unwrap(), data_provider);
             let script = BashScript::new(&script);
-            BashExecutor::execute(script).await?;
+            println!("Executing script: {}", script.path);
+            BashExecutor::execute(script).await.unwrap_or_else(|e| {
+                eprintln!("Error executing runner script: {}", e);
+                std::process::exit(1);
+            });
+            println!("Script executed sucessfully, listening for /start signal");
             server.init_connection().await;
             Ok(())
         }
         Commands::Diff { base, head } => {
-            todo!()
+            let base_path = ExecData::get_tag_path(&base);
+            let head_path = ExecData::get_tag_path(&head);
+
+            let base_str = std::fs::read_to_string(base_path)?;
+            let head_str = std::fs::read_to_string(head_path)?;
+
+            let base_data = serde_json::from_str::<ExecData>(&base_str)?;
+            let head_data = serde_json::from_str::<ExecData>(&head_str)?;
+
+            let diff = base_data.compare(&head_data);
+            diff.print_pretty(50);
+            Ok(())
         }
     }
 }

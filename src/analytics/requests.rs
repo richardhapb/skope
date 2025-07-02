@@ -1,4 +1,4 @@
-use crate::analytics::reports::Reportable;
+use crate::analytics::reports::{REPORTS_PATH, Reportable};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ pub struct ExecData {
     pub name: String,
     pub module: Option<String>,
     pub timestamp: i64,
-    #[serde(skip, default="instant")]
+    #[serde(skip, default = "instant")]
     pub init_time: Instant,
     pub system_manager: SystemManager,
     pub exec_time: f32,
@@ -85,10 +85,16 @@ impl ExecData {
 impl DataComparator for ExecData {
     type Diff = Self;
     fn compare(&self, other: &Self) -> Self::Diff {
+        let name = if self.name != other.name {
+            format!("{}-{}", self.name, other.name)
+        } else {
+            self.name.clone()
+        };
+
         Self {
-            name: self.name.clone(),
+            name,
             module: self.module.clone(),
-            timestamp: other.timestamp,
+            timestamp: self.timestamp,
             init_time: self.init_time,
             system_manager: self.system_manager.compare(&other.system_manager),
             exec_time: other.exec_time - self.exec_time,
@@ -97,16 +103,86 @@ impl DataComparator for ExecData {
 }
 
 impl ExecData {
+    /// Generate the starting path in the default directory
     pub fn generate_start_path(&self) -> String {
         format!("{}_start.json", self.default_path())
     }
 
+    /// Generate the stopping path in the default directory
     pub fn generate_stop_path(&self) -> String {
         format!("{}_stop.json", self.default_path())
     }
 
+    /// Get the path for the tag. If a path is provided, return the path itself.
+    /// If only a name is given, return the default path with the tag
+    pub fn get_tag_path(tag: &str) -> String {
+        // TODO: Make this dynamic for Windows integration.
+        if tag.contains('/') {
+            ensure_extension(&format!("{}", tag), "json")
+        } else {
+            ensure_extension(&format!("{}/{}", REPORTS_PATH, tag), "json")
+        }
+    }
+
     pub fn capture_elapsed_time(&mut self) {
         self.exec_time = self.init_time.elapsed().as_secs_f32();
+    }
+
+    pub fn print_pretty(&self, width: usize) {
+        let top_bottom = "=".repeat(width);
+
+        println!("{}", top_bottom);
+        let fields = vec![
+            ("Name", format!("{}", self.name)),
+            ("Module", self.module.clone().unwrap_or("[N/A]".into())),
+            ("Timestamp", self.timestamp.to_string()),
+            (
+                "Memory Usage",
+                format!("{:.2}", self.system_manager.memory_usage),
+            ),
+            (
+                "CPU Usage (%)",
+                format!("{:.2}", self.system_manager.cpu_usage),
+            ),
+            ("Exec Time (Sec)", format!("{:.2}", self.exec_time)),
+        ];
+
+        // Determine the maximum length of the field names
+        let max_field_name_len = fields
+            .iter()
+            .map(|(name, _value)| name.len())
+            .max()
+            .unwrap_or(0);
+
+        // Print each field
+        for (field_name, field_value) in fields {
+            // Calculate padding for the field name
+            let name_padding = " ".repeat(max_field_name_len - field_name.len());
+
+            // Calculate available space for the value
+            // We'll use 4 spaces for " | " and then subtract for the name and its padding
+            let available_value_width = width
+                .saturating_sub(max_field_name_len)
+                .saturating_sub(name_padding.len())
+                .saturating_sub(4); // " | "
+
+            // Truncate or pad the value as needed
+            let mut display_value = field_value;
+            if display_value.len() > available_value_width {
+                // Truncate and add "..."
+                display_value.truncate(available_value_width.saturating_sub(3));
+                display_value.push_str("...");
+            }
+            let value_padding =
+                " ".repeat(available_value_width.saturating_sub(display_value.len()));
+
+            println!(
+                "{}{} | {}{}",
+                field_name, name_padding, display_value, value_padding
+            );
+        }
+
+        println!("{}", top_bottom);
     }
 }
 
@@ -386,5 +462,4 @@ mod tests {
         assert_eq!(diff.system_manager.cpu_usage, 30.0);
         assert_eq!(diff.timestamp, expected_time);
     }
-
 }
