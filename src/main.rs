@@ -79,8 +79,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Runner { script, tag } => {
             let report_writer = RunnerWriter::new(&tag);
-            let data_provider = RunnerReceiver::new(&tag, report_writer);
-            let server: Server<RunnerReceiver<RunnerWriter>> =
+            let data_provider = RunnerReceiver::new(&tag, Box::new(report_writer));
+            let server: Server<RunnerReceiver> =
                 Server::new(host, port.parse().unwrap(), data_provider);
             let script = BashScript::new(&script);
             BashExecutor::execute(script).await?;

@@ -3,6 +3,7 @@ use super::data::DataProvider;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+/// The main server of the application
 #[derive(Debug, Clone)]
 pub struct Server<T: DataProvider + Default> {
     pub host: String,

@@ -17,11 +17,11 @@ pub trait DataProvider {
         self,
         listener: TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    fn handle_client(
+    async fn handle_client(
         &mut self,
         socket: TcpStream,
         addr: SocketAddr,
-    ) -> impl Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send;
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn should_close_connection(&self) -> bool;
 }
 
@@ -101,7 +101,7 @@ impl DataProvider for ServerReceiver {
 
         let mut buf = vec![0u8; 1024];
 
-        let n_exec_ref_inner = self.iteration.clone();
+        let iteration_inner = self.iteration.clone();
 
         // Use a timeout for read operations
         let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
@@ -130,15 +130,16 @@ impl DataProvider for ServerReceiver {
                                     info!(?parsed);
                                     self.process_data(parsed).await?;
 
-                                    let counter = n_exec_ref_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    let counter = iteration_inner.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
                                     let should_generate_report =
-                                    counter + 1 == self.iterations_threshold;
+                                    (counter + 1) % self.iterations_threshold == 0;
 
                                     let exec_data_clone = self.exec_data.read().await.clone();
                                     let exec_agg_clone = self.exec_agg.read().await.clone();
 
                                     if should_generate_report {
+                                        println!("Executed");
                                         let reportables: Vec<Box<dyn Reportable>> =
                                         vec![Box::new(exec_data_clone), Box::new(exec_agg_clone)];
 
@@ -220,14 +221,14 @@ impl ServerReceiver {
 }
 
 /// Handle the data from the runner's execution
-pub struct RunnerReceiver<T: ReportWriter> {
+pub struct RunnerReceiver {
     pub exec_data: ExecData,
-    pub report_writer: T,
-    pub should_close: AtomicBool,
-    pub capturing: AtomicBool,
+    pub report_writer: Box<dyn ReportWriter>,
+    pub should_close: Arc<AtomicBool>,
+    pub capturing: Arc<AtomicBool>,
 }
 
-impl DataProvider for RunnerReceiver<RunnerWriter> {
+impl DataProvider for RunnerReceiver {
     async fn main_loop(
         mut self,
         listener: TcpListener,
@@ -236,6 +237,7 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
             match listener.accept().await {
                 Ok((socket, addr)) => {
                     info!("Client connected: {}", addr);
+
                     self.handle_client(socket, addr).await?;
                     if self.should_close_connection() {
                         let filename1 = self.exec_data.generate_start_path();
@@ -255,6 +257,7 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
         }
         Ok(())
     }
+
     async fn handle_client(
         &mut self,
         mut socket: TcpStream,
@@ -283,6 +286,7 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
                             &self.exec_data,
                             Some(&self.exec_data.generate_start_path()),
                         )?;
+                        continue;
                     }
 
                     if buf.starts_with(b"GET /stop") {
@@ -294,6 +298,7 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
                         }
 
                         // Generate the report and close the connection
+                        self.exec_data.capture_elapsed_time();
                         self.exec_data.system_manager.capture();
                         self.report_writer.generate_report(
                             &self.exec_data,
@@ -302,15 +307,15 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
                         self.should_close.store(true, Ordering::Release);
                         break;
                     }
+
+                    // Unknown request
+                    println!("Unknown request: {:?}", String::from_utf8_lossy(&buf));
                 }
                 Err(e) => {
                     error!("Error reading request: {}", e);
                     return Err(Box::new(e));
                 }
             }
-            self.report_writer
-                .generate_report(&self.exec_data, Some(&self.exec_data.name))?;
-            self.exec_data.system_manager.capture();
         }
         Ok(())
     }
@@ -320,21 +325,21 @@ impl DataProvider for RunnerReceiver<RunnerWriter> {
     }
 }
 
-impl Default for RunnerReceiver<RunnerWriter> {
+impl Default for RunnerReceiver {
     fn default() -> Self {
         let report_writer = RunnerWriter::default();
-        Self::new("", report_writer)
+        Self::new("", Box::new(report_writer))
     }
 }
 
-impl<T: ReportWriter> RunnerReceiver<T> {
+impl RunnerReceiver {
     /// Create a new [`RunnerReceiver`] with the current system state
-    pub fn new(name: &str, report_writer: T) -> Self {
+    pub fn new(name: &str, report_writer: Box<dyn ReportWriter + 'static>) -> Self {
         Self {
             exec_data: ExecData::from_system_data(name),
             report_writer,
-            should_close: AtomicBool::new(false),
-            capturing: AtomicBool::new(false),
+            should_close: Arc::new(AtomicBool::new(false)),
+            capturing: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -368,26 +373,38 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct MockReportWriter {
-        iterations_threshold: usize,
+    struct TestReportWriter {
         generated_flag: Arc<AtomicBool>,
+        reports_count: Arc<AtomicUsize>
     }
 
-    impl ReportWriter for MockReportWriter {
+    impl ReportWriter for TestReportWriter {
         fn write_reports(&self, _reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
             self.generated_flag.store(true, Ordering::SeqCst);
+            self.reports_count.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn generate_report(
+                &self,
+                _reportable: &dyn Reportable,
+                _path: Option<&str>,
+            ) -> std::io::Result<()> {
+            self.generated_flag.store(true, Ordering::SeqCst);
+            self.reports_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
     }
 
-    impl MockReportWriter {
-        fn new() -> (Self, Arc<AtomicBool>) {
+    impl TestReportWriter {
+        fn new() -> (Self, Arc<AtomicBool>, Arc<AtomicUsize>) {
             let flag = Arc::new(AtomicBool::new(false));
+            let count = Arc::new(AtomicUsize::new(0));
             let writer = Self {
-                iterations_threshold: 10,
                 generated_flag: Arc::clone(&flag),
+                reports_count: Arc::clone(&count)
             };
-            (writer, flag)
+            (writer, flag, count)
         }
     }
 
@@ -408,10 +425,9 @@ mod tests {
     // for example, if the threshold is defined as 10, after 10 requests
     // the report should be generated.
     async fn test_generate_report() {
-        let (report_writer_mock, generated_flag) = MockReportWriter::new();
+        let (report_writer_mock, generated_flag, reports_count) = TestReportWriter::new();
         let test_server_port = find_available_port();
         let report_writer = Arc::new(report_writer_mock);
-        let report_writer_mock_clone = report_writer.clone();
         let data_provider = ServerReceiver::new(report_writer);
 
         let server: Server<ServerReceiver> =
@@ -428,7 +444,7 @@ mod tests {
             let mut client = Client::new("127.0.0.1", test_server_port);
             let app_data_for_json = AppData::new();
 
-            for i in 0..report_writer_mock_clone.iterations_threshold {
+            for i in 0..10 {
                 let mut exec_data_to_send = app_data_for_json.exec_data.clone();
                 exec_data_to_send.name = format!("test_exec_{}", i);
 
@@ -453,6 +469,7 @@ mod tests {
         server_handle.abort(); // Clean up server
 
         assert!(test_result.is_ok(), "Test timed out");
+        assert_eq!(reports_count.load(Ordering::Acquire), 1);
         assert!(
             generated_flag.load(Ordering::SeqCst),
             "Report was not generated"
@@ -463,7 +480,7 @@ mod tests {
     async fn test_process_data() {
         let test_server_port = find_available_port();
         let mut data = AppData::new();
-        let (mock_writer, _) = MockReportWriter::new();
+        let (mock_writer, _, _) = TestReportWriter::new();
         let data_provider = ServerReceiver::new(Arc::new(mock_writer));
         let server = Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
 
@@ -511,6 +528,63 @@ mod tests {
                 .total_exec_time,
             data.exec_data.exec_time * 2.0
         );
+    }
+
+    #[tokio::test]
+    async fn test_runner_connection() {
+        let test_server_port = find_available_port();
+        let (mock_writer, generated_flag, reports_count) = TestReportWriter::new();
+        let data_provider = RunnerReceiver::new("test", Box::new(mock_writer));
+        let capturing = data_provider.capturing.clone();
+        let should_close = data_provider.should_close.clone();
+        let server = Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
+
+        let server_handle = tokio::spawn(async move {
+            server.init_connection().await;
+        });
+
+        // Expect to the server
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = Client::new("127.0.0.1", test_server_port);
+
+        // Should not be capturing now
+        assert!(!capturing.load(Ordering::Relaxed));
+
+        let request = b"GET /start";
+        client
+            .stream
+            .write_all(request)
+            .expect("error writing data");
+        client.stream.flush().expect("error flushing");
+
+        // Give server time to process the request
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Should BE capturing now
+        assert!(capturing.load(Ordering::Relaxed), "Should be capturing after /start");
+        assert!(!should_close.load(Ordering::Relaxed), "Should not be closing after /start");
+        assert_eq!(reports_count.load(Ordering::Relaxed), 1);
+
+        let request = b"GET /stop";
+        client
+            .stream
+            .write_all(request)
+            .expect("error writing data");
+        client.stream.flush().expect("error flushing");
+
+        // Give server time to process the request and generate report
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Should NOT be capturing now (it was swapped to false)
+        assert!(!capturing.load(Ordering::Relaxed), "Should not be capturing after /stop");
+        // Should close connection
+        assert!(should_close.load(Ordering::Relaxed), "Should be closing after /stop");
+        assert!(generated_flag.load(Ordering::SeqCst), "Report should have been generated");
+        // The two reports and the diff report.
+        assert_eq!(reports_count.load(Ordering::Relaxed), 3);
+
+        server_handle.abort();
     }
 
     // Helper function to find available port

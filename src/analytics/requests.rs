@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
+use std::time::Instant;
 
 use crate::system::manager::{SystemCapturer, SystemManager};
 
@@ -32,14 +33,34 @@ pub trait DataComparator: DeserializeOwned {
     }
 }
 
+/// Default implementation for [`Instant`]
+fn instant() -> Instant {
+    Instant::now()
+}
+
 /// Store a unit of execution bench
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ExecData {
     pub name: String,
     pub module: Option<String>,
     pub timestamp: i64,
+    #[serde(skip, default="instant")]
+    pub init_time: Instant,
     pub system_manager: SystemManager,
     pub exec_time: f32,
+}
+
+impl Default for ExecData {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            module: None,
+            timestamp: chrono::Local::now().timestamp(),
+            init_time: Instant::now(),
+            system_manager: SystemManager::default(),
+            exec_time: 0.0,
+        }
+    }
 }
 
 impl PartialEq for ExecData {
@@ -54,6 +75,7 @@ impl ExecData {
             name: name.into(),
             module: None,
             timestamp: chrono::Local::now().timestamp(),
+            init_time: Instant::now(),
             system_manager: SystemManager::default(),
             exec_time: 0.0,
         }
@@ -67,6 +89,7 @@ impl DataComparator for ExecData {
             name: self.name.clone(),
             module: self.module.clone(),
             timestamp: other.timestamp,
+            init_time: self.init_time,
             system_manager: self.system_manager.compare(&other.system_manager),
             exec_time: other.exec_time - self.exec_time,
         }
@@ -80,6 +103,10 @@ impl ExecData {
 
     pub fn generate_stop_path(&self) -> String {
         format!("{}_stop.json", self.default_path())
+    }
+
+    pub fn capture_elapsed_time(&mut self) {
+        self.exec_time = self.init_time.elapsed().as_secs_f32();
     }
 }
 
@@ -330,4 +357,34 @@ mod tests {
         assert!(diff.exclusive.contains(&"exclusive_data".to_string()));
         assert!(diff.missed.contains(&"missed_data".to_string()));
     }
+
+    #[test]
+    fn test_exec_data_compare() {
+        let mut data1 = ExecData::default();
+        let mut data2 = ExecData::default();
+
+        data1.system_manager.memory_usage = 10.0;
+        data2.system_manager.memory_usage = 20.0;
+
+        data1.system_manager.cpu_usage = 50.0;
+        data2.system_manager.cpu_usage = 80.0;
+
+        data1.timestamp =
+            chrono::DateTime::parse_from_str("2025-05-01 9:00 +0000", "%Y-%m-%d %H:%M %z")
+                .unwrap()
+                .timestamp();
+
+        let expected_time =
+            chrono::DateTime::parse_from_str("2025-05-02 11:00 +0000", "%Y-%m-%d %H:%M %z")
+                .unwrap()
+                .timestamp();
+
+        data2.timestamp = expected_time;
+        let diff = data1.compare(&data2);
+
+        assert_eq!(diff.system_manager.memory_usage, 10.0);
+        assert_eq!(diff.system_manager.cpu_usage, 30.0);
+        assert_eq!(diff.timestamp, expected_time);
+    }
+
 }
