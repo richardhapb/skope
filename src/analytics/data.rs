@@ -303,13 +303,10 @@ impl DataProvider for RunnerReceiver {
                         }
 
                         let request = String::from_utf8_lossy(&buf);
-                        let raw_name = request.split_once("=");
+                        let maybe_name = self.parse_app_name(&request);
 
-                        // TODO: Improve this
-                        if let Some(raw_name) = raw_name {
-                            if let Some(name) = raw_name.1.split_once(" ") {
-                                self.report_writer.set_report_name(name.0);
-                            }
+                        if let Some(name) = maybe_name {
+                            self.report_writer.set_report_name(&name.to_string());
                         }
                     }
 
@@ -377,6 +374,20 @@ impl RunnerReceiver {
             server_mode: Arc::new(AtomicBool::new(false)),
             should_close: Arc::new(AtomicBool::new(false)),
             capturing: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn parse_app_name<'a>(&'a self, request: &'a str) -> Option<&'a str> {
+        // If `=` is not found, return None.
+        let (_, after_equals) = request.split_once("=")?;
+
+        let delimiters = ['&', ' ', '\r', '\n'];
+
+        if let Some(first_delimiter_idx) = after_equals.find(&delimiters[..]) {
+            Some(&after_equals[..first_delimiter_idx])
+        } else {
+            // If no delimiter is found, the entire string after '=' is the name.
+            Some(after_equals)
         }
     }
 }
@@ -615,6 +626,31 @@ mod tests {
         assert_eq!(reports_count.load(Ordering::Relaxed), 1);
 
         server_handle.abort();
+    }
+
+    #[test]
+    fn test_parse_name() {
+        let provider = RunnerReceiver::default();
+        let request = "GET /start?name=hello";
+
+        let name = provider.parse_app_name(request);
+
+        assert!(name.is_some());
+        assert_eq!(name.unwrap(), "hello");
+
+        let request = "GET /start?name=hello&another_arg=20";
+
+        let name = provider.parse_app_name(request);
+
+        assert!(name.is_some());
+        assert_eq!(name.unwrap(), "hello");
+
+        let request = "GET /start?name=hello\r\nDate";
+
+        let name = provider.parse_app_name(request);
+
+        assert!(name.is_some());
+        assert_eq!(name.unwrap(), "hello");
     }
 
     // Helper function to find available port

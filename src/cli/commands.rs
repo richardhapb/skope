@@ -10,7 +10,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, PartialEq)]
 pub enum Commands {
-    /// The executor of the application
+    /// Execute the application using an script
     Runner {
         /// The path of the running script (e.g. run_app.sh)
         #[arg(long)]
