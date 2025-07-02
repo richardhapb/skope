@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server => {
+        Commands::Agg => {
             let report_writer = Arc::new(ServerWriter::new());
             let data_provider = ServerReceiver::new(report_writer);
             let server: Server<ServerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
@@ -90,10 +90,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Error executing runner script: {}", e);
                 std::process::exit(1);
             });
-            println!("Script executed sucessfully, listening for /start signal");
+            println!("Script executed sucessfully, listening for /start request");
             server.init_connection().await;
             // Expect the command shutdown
             handler.await?;
+            Ok(())
+        }
+        Commands::Server => {
+            println!("Starting server...");
+            let report_writer = RunnerWriter::new("");
+            let data_provider = RunnerReceiver::new("app", Box::new(report_writer));
+            let server: Server<RunnerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
+            println!("Listening for /start=<app_name> request");
+            server.init_connection().await;
             Ok(())
         }
         Commands::Diff { base, head } => {

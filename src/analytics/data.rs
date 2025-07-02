@@ -19,7 +19,7 @@ pub trait DataProvider {
         socket: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    fn should_close_connection(&self) -> bool;
+    fn should_generate_report(&self) -> bool;
 
     async fn reponse_success(&self, socket: &mut TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         debug!("Responding to client with a successful response");
@@ -189,7 +189,7 @@ impl DataProvider for ServerReceiver {
         }
     }
 
-    fn should_close_connection(&self) -> bool {
+    fn should_generate_report(&self) -> bool {
         todo!()
     }
 }
@@ -236,6 +236,7 @@ pub struct RunnerReceiver {
     pub exec_data: ExecData,
     pub diff: Option<ExecData>,
     pub report_writer: Box<dyn ReportWriter>,
+    pub server_mode: Arc<AtomicBool>,
     pub should_close: Arc<AtomicBool>,
     pub capturing: Arc<AtomicBool>,
 }
@@ -248,13 +249,17 @@ impl DataProvider for RunnerReceiver {
                     info!("Client connected: {}", addr);
 
                     self.handle_client(socket, addr).await?;
-                    if self.should_close_connection() {
+                    if self.should_generate_report() {
                         // Calculate the difference and generate the final report
                         if let Some(diff) = self.diff {
+                            self.diff = None;
                             self.report_writer.generate_report(&diff, None)?;
                             println!("Capture finished successfully, written in {}", diff.default_path());
                         }
-                        break;
+
+                        if !self.server_mode.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -263,6 +268,7 @@ impl DataProvider for RunnerReceiver {
                 }
             }
         }
+        info!("Closing server");
         Ok(())
     }
 
@@ -287,6 +293,24 @@ impl DataProvider for RunnerReceiver {
                     if self.capturing.swap(true, Ordering::AcqRel) {
                         warn!("Attempting to start a capture that is already in progress");
                         println!("The capture has started; skipping the request.");
+                    }
+
+                    if self.server_mode.load(Ordering::Relaxed) {
+                        if !buf.starts_with(b"GET /start?name=") {
+                            eprintln!("The name parameter is required for server mode, e.g., /start?name=my_app");
+                            self.reponse_bad_request(&mut socket).await?;
+                            return Ok(());
+                        }
+
+                        let request = String::from_utf8_lossy(&buf);
+                        let raw_name = request.split_once("=");
+
+                        // TODO: Improve this
+                        if let Some(raw_name) = raw_name {
+                            if let Some(name) = raw_name.1.split_once(" ") {
+                                self.report_writer.set_report_name(name.0);
+                            }
+                        }
                     }
 
                     // First capture
@@ -331,7 +355,7 @@ impl DataProvider for RunnerReceiver {
         Ok(())
     }
 
-    fn should_close_connection(&self) -> bool {
+    fn should_generate_report(&self) -> bool {
         self.should_close.load(Ordering::Relaxed)
     }
 }
@@ -350,6 +374,7 @@ impl RunnerReceiver {
             exec_data: ExecData::from_system_data(name),
             report_writer,
             diff: None,
+            server_mode: Arc::new(AtomicBool::new(false)),
             should_close: Arc::new(AtomicBool::new(false)),
             capturing: Arc::new(AtomicBool::new(false)),
         }
@@ -402,6 +427,8 @@ mod tests {
             self.reports_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
+
+        fn set_report_name(&mut self, _new_name: &str) {}
     }
 
     impl TestReportWriter {

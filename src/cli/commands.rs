@@ -19,8 +19,10 @@ pub enum Commands {
         #[arg(short, long)]
         tag: String,
     },
-    /// Init in server mode
+    /// Start a server listening for the /start and /stop signals and write each difference to a report
     Server,
+    /// Start a server to store various application names and generate aggregate data.
+    Agg,
     /// Compare two tagged captures
     Diff {
         /// The base capture for comparation

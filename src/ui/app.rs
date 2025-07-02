@@ -387,6 +387,8 @@ mod tests {
         fn write_reports(&self, _reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()> {
             Ok(())
         }
+
+        fn set_report_name(&mut self, _new_name: &str) {}
     }
 
     #[test]
