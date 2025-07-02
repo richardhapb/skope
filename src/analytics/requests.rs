@@ -1,4 +1,4 @@
-use crate::analytics::reports::{REPORTS_PATH, Reportable};
+use crate::analytics::reports::REPORTS_PATH;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -103,16 +103,6 @@ impl DataComparator for ExecData {
 }
 
 impl ExecData {
-    /// Generate the starting path in the default directory
-    pub fn generate_start_path(&self) -> String {
-        format!("{}_start.json", self.default_path())
-    }
-
-    /// Generate the stopping path in the default directory
-    pub fn generate_stop_path(&self) -> String {
-        format!("{}_stop.json", self.default_path())
-    }
-
     /// Get the path for the tag. If a path is provided, return the path itself.
     /// If only a name is given, return the default path with the tag
     pub fn get_tag_path(tag: &str) -> String {
@@ -431,15 +421,15 @@ mod tests {
         data1.system_manager.cpu_usage = 50.0;
         data2.system_manager.cpu_usage = 80.0;
 
-        data1.timestamp = chrono::DateTime::parse_from_str("2025-05-01 9:00 +0000", "%Y-%m-%d %H:%M %z")
+        let expected_time = chrono::DateTime::parse_from_str("2025-05-01 11:00 +0000", "%Y-%m-%d %H:%M %z")
             .unwrap()
             .timestamp();
 
-        let expected_time = chrono::DateTime::parse_from_str("2025-05-02 11:00 +0000", "%Y-%m-%d %H:%M %z")
+        data1.timestamp = expected_time;
+        data2.timestamp = chrono::DateTime::parse_from_str("2025-05-02 9:00 +0000", "%Y-%m-%d %H:%M %z")
             .unwrap()
             .timestamp();
 
-        data2.timestamp = expected_time;
         let diff = data1.compare(&data2);
 
         assert_eq!(diff.system_manager.memory_usage, 10.0);

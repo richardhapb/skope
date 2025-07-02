@@ -1,5 +1,5 @@
 use std::error::Error;
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinHandle};
 use tracing::{error, info, warn};
 
 pub trait Executable {
@@ -26,20 +26,20 @@ pub trait ScriptExecutor {
     // The `execute` method will return `Ok(())` if the task is successfully spawned.
     // Errors from the script's execution will be logged internally but not propagated
     // via this return value.
-    async fn execute(executable: impl Executable + Send + Sync + 'static) -> Result<(), Box<dyn Error>>;
+    async fn execute(executable: impl Executable + Send + Sync + 'static) -> Result<JoinHandle<()>, Box<dyn Error>>;
 }
 
 pub struct BashExecutor;
 
 impl ScriptExecutor for BashExecutor {
-    async fn execute(executable: impl Executable + Send + Sync + 'static) -> Result<(), Box<dyn Error>> {
+    async fn execute(executable: impl Executable + Send + Sync + 'static) -> Result<JoinHandle<()>, Box<dyn Error>> {
         let location = executable.get_location();
 
         let content = tokio::fs::read_to_string(location).await?;
 
         // Spawn a new asynchronous task that will execute the bash command.
         // This task will run independently in the background.
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             let output = Command::new("bash").arg("-c").arg(&content).output().await; // Await the script's completion within this spawned task
 
             match output {
@@ -47,10 +47,10 @@ impl ScriptExecutor for BashExecutor {
                     if output.status.success() {
                         info!("Script finished successfully.");
                         if !output.stdout.is_empty() {
-                            info!("Script stdout: {}", String::from_utf8_lossy(&output.stdout));
+                            info!("Script stdout:\n{}", String::from_utf8_lossy(&output.stdout));
                         }
                         if !output.stderr.is_empty() {
-                            warn!("Script stderr: {}", String::from_utf8_lossy(&output.stderr));
+                            warn!("Script stderr:\n{}", String::from_utf8_lossy(&output.stderr));
                         }
                     } else {
                         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -65,10 +65,6 @@ impl ScriptExecutor for BashExecutor {
                     error!("Failed to launch bash command: {}", e);
                 }
             }
-        });
-
-        // The `execute` function returns immediately after spawning the task.
-        // It does NOT wait for the script to complete.
-        Ok(())
+        }))
     }
 }

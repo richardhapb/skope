@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use analytics::data::RunnerReceiver;
 use analytics::data::ServerReceiver;
+use analytics::reports::ReportWriter;
+use analytics::reports::Reportable;
 use analytics::reports::RunnerWriter;
 use analytics::requests::DataComparator;
 use analytics::requests::ExecData;
@@ -84,12 +86,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let server: Server<RunnerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
             let script = BashScript::new(&script);
             println!("Executing script: {}", script.path);
-            BashExecutor::execute(script).await.unwrap_or_else(|e| {
+            let handler = BashExecutor::execute(script).await.unwrap_or_else(|e| {
                 eprintln!("Error executing runner script: {}", e);
                 std::process::exit(1);
             });
             println!("Script executed sucessfully, listening for /start signal");
             server.init_connection().await;
+            // Expect the command shutdown
+            handler.await?;
             Ok(())
         }
         Commands::Diff { base, head } => {
@@ -104,6 +108,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let diff = base_data.compare(&head_data);
             diff.print_pretty(50);
+
+            let report_writer = RunnerWriter::new(&format!("{}-{}.json", base, head));
+            report_writer.generate_report(&diff, None)?;
+            println!("The difference report was generated at {}", diff.default_path());
+
             Ok(())
         }
     }

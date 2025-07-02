@@ -7,7 +7,7 @@ use super::requests::{AggData, ExecAgg, ExecData, to_safe_name};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
@@ -20,6 +20,33 @@ pub trait DataProvider {
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn should_close_connection(&self) -> bool;
+
+    async fn reponse_success(&self, socket: &mut TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Responding to client with a successful response");
+
+        let response = b"HTTP/1.1 200 OK
+Content-Length: 0";
+
+        socket.write_all(response).await?;
+        socket.flush().await?;
+
+        Ok(())
+    }
+
+    async fn reponse_bad_request(
+        &self,
+        socket: &mut TcpStream,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Responding to client with a bad request response");
+
+        let response = b"HTTP/1.1 404 Bad Request
+Content-Length: 0";
+
+        socket.write_all(response).await?;
+        socket.flush().await?;
+
+        Ok(())
+    }
 }
 
 /// Receive and process the data in Server mode
@@ -207,6 +234,7 @@ impl ServerReceiver {
 /// Handle the data from the runner's execution
 pub struct RunnerReceiver {
     pub exec_data: ExecData,
+    pub diff: Option<ExecData>,
     pub report_writer: Box<dyn ReportWriter>,
     pub should_close: Arc<AtomicBool>,
     pub capturing: Arc<AtomicBool>,
@@ -221,13 +249,11 @@ impl DataProvider for RunnerReceiver {
 
                     self.handle_client(socket, addr).await?;
                     if self.should_close_connection() {
-                        let filename1 = self.exec_data.generate_start_path();
-                        let filename2 = self.exec_data.generate_stop_path();
-
                         // Calculate the difference and generate the final report
-                        let diff = self.exec_data.compare_files(&filename1, &filename2)?;
-                        self.report_writer.generate_report(&diff, None)?;
-                        println!("Capture finished successfully, written in {}", diff.default_path());
+                        if let Some(diff) = self.diff {
+                            self.report_writer.generate_report(&diff, None)?;
+                            println!("Capture finished successfully, written in {}", diff.default_path());
+                        }
                         break;
                     }
                 }
@@ -265,8 +291,7 @@ impl DataProvider for RunnerReceiver {
 
                     // First capture
                     self.exec_data.system_manager.capture();
-                    self.report_writer
-                        .generate_report(&self.exec_data, Some(&self.exec_data.generate_start_path()))?;
+                    self.reponse_success(&mut socket).await?;
                     return Ok(());
                 }
 
@@ -278,12 +303,15 @@ impl DataProvider for RunnerReceiver {
                         println!("No capture has started; please start one first.");
                     }
 
+                    let before = self.exec_data.clone();
+
                     // Generate the report and close the connection
                     self.exec_data.capture_elapsed_time();
                     self.exec_data.system_manager.capture();
-                    self.report_writer
-                        .generate_report(&self.exec_data, Some(&self.exec_data.generate_stop_path()))?;
+                    self.diff = Some(before.compare(&self.exec_data));
+
                     self.should_close.store(true, Ordering::Release);
+                    self.reponse_success(&mut socket).await?;
                     return Ok(());
                 }
 
@@ -292,9 +320,11 @@ impl DataProvider for RunnerReceiver {
                     "Unknown request: {:?}",
                     String::from_utf8_lossy(&buf).split_once("\r\n").unwrap_or(("", "")).0
                 );
+                self.reponse_bad_request(&mut socket).await?;
             }
             Err(e) => {
                 error!("Error reading request: {}", e);
+                self.reponse_bad_request(&mut socket).await?;
                 return Err(Box::new(e));
             }
         }
@@ -319,6 +349,7 @@ impl RunnerReceiver {
         Self {
             exec_data: ExecData::from_system_data(name),
             report_writer,
+            diff: None,
             should_close: Arc::new(AtomicBool::new(false)),
             capturing: Arc::new(AtomicBool::new(false)),
         }
@@ -530,7 +561,11 @@ mod tests {
             !should_close.load(Ordering::Relaxed),
             "Should not be closing after /start"
         );
-        assert_eq!(reports_count.load(Ordering::Relaxed), 1);
+        assert!(!generated_flag.load(Ordering::SeqCst), "Report generated early");
+        assert_eq!(reports_count.load(Ordering::Relaxed), 0);
+
+        // The connection is closed and requires a new connection
+        let mut client = Client::new("127.0.0.1", test_server_port);
 
         let request = b"GET /stop";
         client.stream.write_all(request).expect("error writing data");
@@ -550,8 +585,7 @@ mod tests {
             generated_flag.load(Ordering::SeqCst),
             "Report should have been generated"
         );
-        // The two reports and the diff report.
-        assert_eq!(reports_count.load(Ordering::Relaxed), 3);
+        assert_eq!(reports_count.load(Ordering::Relaxed), 1);
 
         server_handle.abort();
     }
