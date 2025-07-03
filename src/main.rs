@@ -49,22 +49,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .init();
     }
 
-    let host = std::env::var("SKOPE_HOST").unwrap_or_else(|_| {
+    let cli = Cli::parse();
+
+    let host = cli.host.unwrap_or(std::env::var("SKOPE_HOST").unwrap_or_else(|_| {
         debug!("SKOPE_HOST environment variable not set, using default (0.0.0.0)");
         "0.0.0.0".to_string()
+    }));
+    let port = cli.port.unwrap_or_else(|| {
+        let env_port = std::env::var("SKOPE_PORT");
+        if let Ok(env_port) = env_port {
+            env_port.parse().unwrap()
+        } else {
+            debug!("SKOPE_PORT environment variable not set, using default (9001)");
+            9001
+        }
     });
-    let port = std::env::var("SKOPE_PORT").unwrap_or_else(|_| {
-        debug!("SKOPE_PORT environment variable not set, using default (9001)");
-        9001.to_string()
-    });
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Agg => {
             let report_writer = Arc::new(ServerWriter::new());
             let data_provider = ServerReceiver::new(report_writer);
-            let server: Server<ServerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
+            let server: Server<ServerReceiver> = Server::new(host, port, data_provider);
             let exec_agg_ref = server.data_provider.exec_agg.clone();
 
             debug!("Initialized with empty aggregation data");
@@ -83,7 +88,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Runner { script, tag } => {
             let report_writer = RunnerWriter::new(&tag);
             let data_provider = RunnerReceiver::new(&tag, Box::new(report_writer));
-            let server: Server<RunnerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
+            let server: Server<RunnerReceiver> = Server::new(host, port, data_provider);
             let script = BashScript::new(&script);
             println!("Executing script: {}", script.path);
             let handler = BashExecutor::execute(script).await.unwrap_or_else(|e| {
@@ -100,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Starting server...");
             let report_writer = RunnerWriter::new("");
             let data_provider = RunnerReceiver::new("app", Box::new(report_writer));
-            let server: Server<RunnerReceiver> = Server::new(host, port.parse().unwrap(), data_provider);
+            let server: Server<RunnerReceiver> = Server::new(host, port, data_provider);
             println!("Listening for /start=<app_name> request");
             server.init_connection().await;
             Ok(())

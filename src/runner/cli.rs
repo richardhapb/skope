@@ -40,6 +40,8 @@ impl ScriptExecutor for BashExecutor {
         // Spawn a new asynchronous task that will execute the bash command.
         // This task will run independently in the background.
         Ok(tokio::spawn(async move {
+            // Time to start the server
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let output = Command::new("bash").arg("-c").arg(&content).output().await; // Await the script's completion within this spawned task
 
             match output {

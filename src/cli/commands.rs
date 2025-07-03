@@ -6,6 +6,14 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// The host that Skope will be listening to
+    #[arg(short, long, global = true)]
+    pub host: Option<String>,
+
+    /// The port that Skope will be listening to
+    #[arg(short, long, global = true)]
+    pub port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
