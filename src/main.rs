@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let script = BashScript::new(&script);
             println!("Executing script: {}", script.path);
             let handler = BashExecutor::execute(script).await.unwrap_or_else(|e| {
-                eprintln!("Error executing runner script: {}", e);
+                eprintln!("Error executing runner script: {e}");
                 std::process::exit(1);
             });
             println!("Script executed sucessfully, listening for /start request");
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let diff = base_data.compare(&head_data);
             diff.print_pretty(50);
 
-            let report_writer = RunnerWriter::new(&format!("{}-{}.json", base, head));
+            let report_writer = RunnerWriter::new(&format!("{base}-{head}.json"));
             report_writer.generate_report(&diff, None)?;
             println!("The difference report was generated at {}", diff.default_path());
 

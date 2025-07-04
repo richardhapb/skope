@@ -15,7 +15,7 @@ pub trait Reportable: Sync + Send {
 
 impl Reportable for ExecAgg {
     fn default_path(&self) -> String {
-        format!("{}/report_agg.json", REPORTS_PATH)
+        format!("{REPORTS_PATH}/report_agg.json")
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -35,7 +35,7 @@ impl Reportable for ExecData {
 
 impl Reportable for Vec<ExecData> {
     fn default_path(&self) -> String {
-        format!("{}/report_apps.json", REPORTS_PATH)
+        format!("{REPORTS_PATH}/report_apps.json")
     }
 
     fn report_data(&self) -> Result<String, serde_json::Error> {
@@ -48,16 +48,14 @@ pub trait ReportWriter: Send + Sync + Debug {
     fn write_reports(&self, reportables: Vec<Box<dyn Reportable>>) -> std::io::Result<()>;
 
     fn generate_report(&self, reportable: &dyn Reportable, path: Option<&str>) -> std::io::Result<()> {
-        if !fs::metadata(REPORTS_PATH).is_ok() {
+        if fs::metadata(REPORTS_PATH).is_err() {
             fs::create_dir(REPORTS_PATH)?;
         }
         let default_path = &reportable.default_path();
         let report_path = path.unwrap_or(default_path);
         let mut file = File::create(report_path)?;
 
-        let app_data = reportable
-            .report_data()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let app_data = reportable.report_data().map_err(std::io::Error::other)?;
 
         file.write_all(app_data.as_bytes())?;
         info!(%report_path, "Report written");
@@ -65,7 +63,7 @@ pub trait ReportWriter: Send + Sync + Debug {
         Ok(())
     }
 
-    fn set_report_name(&mut self, new_name: &str);
+    fn set_report_name(&mut self, new_name: String);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -84,7 +82,7 @@ impl ReportWriter for ServerWriter {
     }
 
     // Perhaps this can accomplish something?
-    fn set_report_name(&mut self, _new_name: &str) {}
+    fn set_report_name(&mut self, _new_name: String) {}
 }
 
 impl ServerWriter {
@@ -109,8 +107,8 @@ impl ReportWriter for RunnerWriter {
         Ok(())
     }
 
-    fn set_report_name(&mut self, new_name: &str) {
-        self.report_name = new_name.into()
+    fn set_report_name(&mut self, new_name: String) {
+        self.report_name = new_name
     }
 }
 

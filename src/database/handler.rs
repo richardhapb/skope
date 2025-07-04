@@ -1,4 +1,3 @@
-
 use crate::analytics::requests::{AggData, ExecAgg};
 
 struct Database {
@@ -44,16 +43,18 @@ impl Storable for ExecAgg {
         let placeholders = self
             .exec_data
             .values()
-            .map(|v| format!("({})",
-                format!("'{}'", v.name),
-                v.total_execs,
-                /////////////
-        ))
+            .map(|v| {
+                format!(
+                    "({})",
+                    format!("'{}'", v.name),
+                    v.total_execs,
+                    /////////////
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let raw_query = format!(
-            "INSERT INTO exec_agg (name, total_execs, total_exec_time, total_memory_usage, avg_exec_memory, avg_exec_time) VALUES ({})",
-            placeholders
+            "INSERT INTO exec_agg (name, total_execs, total_exec_time, total_memory_usage, avg_exec_memory, avg_exec_time) VALUES ({placeholders})",
         );
 
         Query {

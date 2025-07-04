@@ -36,7 +36,7 @@ impl Display for MetricType {
             MetricType::DiffView(metric) => &format!("Captures difference - {}", metric.to_owned()),
         };
 
-        write!(f, "{}", val)
+        write!(f, "{val}")
     }
 }
 

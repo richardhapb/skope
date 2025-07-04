@@ -27,7 +27,6 @@ impl<T: DataProvider + Default> Server<T> {
             host,
             port,
             data_provider,
-            ..Default::default()
         }
     }
 
@@ -36,12 +35,12 @@ impl<T: DataProvider + Default> Server<T> {
         let binding = format!("{}:{}", self.host, self.port);
         let listener = TcpListener::bind(&binding)
             .await
-            .expect(&format!("Error binding {}", binding));
+            .unwrap_or_else(|_| panic!("Error binding {binding}"));
 
         info!("Skope listening on {}", binding);
         self.data_provider.main_loop(listener).await.unwrap_or_else(|e| {
             error!(%e, "Error wstablishing the connection");
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             std::process::exit(1);
         })
     }

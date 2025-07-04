@@ -108,9 +108,9 @@ impl ExecData {
     pub fn get_tag_path(tag: &str) -> String {
         // TODO: Make this dynamic for Windows integration.
         if tag.contains('/') {
-            ensure_extension(&format!("{}", tag), "json")
+            ensure_extension(tag, "json")
         } else {
-            ensure_extension(&format!("{}/{}", REPORTS_PATH, tag), "json")
+            ensure_extension(&format!("{REPORTS_PATH}/{tag}"), "json")
         }
     }
 
@@ -121,9 +121,9 @@ impl ExecData {
     pub fn print_pretty(&self, width: usize) {
         let top_bottom = "=".repeat(width);
 
-        println!("{}", top_bottom);
+        println!("{top_bottom}");
         let fields = vec![
-            ("Name", format!("{}", self.name)),
+            ("Name", self.name.to_owned()),
             ("Module", self.module.clone().unwrap_or("[N/A]".into())),
             ("Timestamp", self.timestamp.to_string()),
             ("Memory Usage", format!("{:.2}", self.system_manager.memory_usage)),
@@ -155,10 +155,10 @@ impl ExecData {
             }
             let value_padding = " ".repeat(available_value_width.saturating_sub(display_value.len()));
 
-            println!("{}{} | {}{}", field_name, name_padding, display_value, value_padding);
+            println!("{field_name}{name_padding} | {display_value}{value_padding}");
         }
 
-        println!("{}", top_bottom);
+        println!("{top_bottom}");
     }
 }
 
@@ -272,7 +272,7 @@ fn ensure_extension(filename: &str, extension: &str) -> String {
     if filename.ends_with(extension) {
         filename.to_string()
     } else {
-        format!("{}.{}", filename, extension)
+        format!("{filename}.{extension}")
     }
 }
 
@@ -377,7 +377,7 @@ mod tests {
         let filename = "somefile";
         let with_extension = ensure_extension(filename, "json");
 
-        assert_eq!(format!("{}.json", filename), with_extension);
+        assert_eq!(format!("{filename}.json"), with_extension);
     }
 
     #[test]

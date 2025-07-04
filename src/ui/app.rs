@@ -70,12 +70,12 @@ enum Page {
 impl Display for Page {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let val = match self {
-            Page::First((m1, m2)) => format!("First page: {}, {}", m1, m2),
-            Page::Second((m1, m2)) => format!("Second page: {}, {}", m1, m2),
-            Page::DiffView((m, _)) => format!("Diff view page: {}", m),
+            Page::First((m1, m2)) => format!("First page: {m1}, {m2}"),
+            Page::Second((m1, m2)) => format!("Second page: {m1}, {m2}"),
+            Page::DiffView((m, _)) => format!("Diff view page: {m}"),
         };
 
-        write!(f, "{}", val)
+        write!(f, "{val}")
     }
 }
 
@@ -232,7 +232,7 @@ impl App {
                 );
                 let diff = receiver
                     .recv()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+                    .map_err(std::io::Error::other);
 
                 if let Ok(Some(diff)) = diff {
                     self.current_page = Page::DiffView((MetricType::TotalExecTime, diff.clone()));
@@ -388,7 +388,7 @@ mod tests {
             Ok(())
         }
 
-        fn set_report_name(&mut self, _new_name: &str) {}
+        fn set_report_name(&mut self, _new_name: String) {}
     }
 
     #[test]

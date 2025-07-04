@@ -5,6 +5,7 @@ use super::reports::{ReportWriter, Reportable, RunnerWriter, ServerWriter};
 use super::requests::{AggData, ExecAgg, ExecData, to_safe_name};
 
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -306,12 +307,12 @@ impl DataProvider for RunnerReceiver {
                         let maybe_name = self.parse_app_name(&request);
 
                         if let Some(name) = maybe_name {
-                            self.report_writer.set_report_name(&name.to_string());
+                            self.report_writer.set_report_name(name.to_owned());
                         }
                     }
 
                     // First capture
-                    self.exec_data.system_manager.capture();
+                    self.system_manager.capture();
                     self.reponse_success(&mut socket).await?;
                     return Ok(());
                 }
@@ -327,8 +328,8 @@ impl DataProvider for RunnerReceiver {
                     let before = self.exec_data.clone();
 
                     // Generate the report and close the connection
-                    self.exec_data.capture_elapsed_time();
-                    self.exec_data.system_manager.capture();
+                    self.capture_elapsed_time();
+                    self.system_manager.capture();
                     self.diff = Some(before.compare(&self.exec_data));
 
                     self.should_close.store(true, Ordering::Release);
@@ -364,6 +365,19 @@ impl Default for RunnerReceiver {
     }
 }
 
+impl Deref for RunnerReceiver {
+    type Target = ExecData;
+    fn deref(&self) -> &Self::Target {
+        &self.exec_data
+    }
+}
+
+impl DerefMut for RunnerReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.exec_data
+    }
+}
+
 impl RunnerReceiver {
     /// Create a new [`RunnerReceiver`] with the current system state
     pub fn new(name: &str, report_writer: Box<dyn ReportWriter + 'static>) -> Self {
@@ -377,7 +391,7 @@ impl RunnerReceiver {
         }
     }
 
-    pub fn parse_app_name<'a>(&'a self, request: &'a str) -> Option<&'a str> {
+    pub fn parse_app_name<'a>(&self, request: &'a str) -> Option<&'a str> {
         // If `=` is not found, return None.
         let (_, after_equals) = request.split_once("=")?;
 
@@ -439,7 +453,7 @@ mod tests {
             Ok(())
         }
 
-        fn set_report_name(&mut self, _new_name: &str) {}
+        fn set_report_name(&mut self, _new_name: String) {}
     }
 
     impl TestReportWriter {
@@ -461,7 +475,7 @@ mod tests {
     impl Client {
         fn new(server_host: &str, server_port: u16) -> Self {
             let stream =
-                TcpStream::connect(format!("{}:{}", server_host, server_port)).expect("Failed to connect to server");
+                TcpStream::connect(format!("{server_host}:{server_port}")).expect("Failed to connect to server");
             Self { stream }
         }
     }
@@ -491,7 +505,7 @@ mod tests {
 
             for i in 0..10 {
                 let mut exec_data_to_send = app_data_for_json.exec_data.clone();
-                exec_data_to_send.name = format!("test_exec_{}", i);
+                exec_data_to_send.name = format!("test_exec_{i}");
 
                 let json_data = serde_json::to_string(&exec_data_to_send)?;
                 client.stream.write_all(json_data.as_bytes())?;
@@ -569,10 +583,10 @@ mod tests {
     async fn test_runner_connection() {
         let test_server_port = find_available_port();
         let (mock_writer, generated_flag, reports_count) = TestReportWriter::new();
-        let data_provider = RunnerReceiver::new("test", Box::new(mock_writer));
-        let capturing = data_provider.capturing.clone();
-        let should_close = data_provider.should_close.clone();
-        let server = Server::new("127.0.0.1".to_string(), test_server_port, data_provider);
+        let data = RunnerReceiver::new("test", Box::new(mock_writer));
+        let capturing = data.capturing.clone();
+        let should_close = data.should_close.clone();
+        let server = Server::new("127.0.0.1".to_string(), test_server_port, data);
 
         let server_handle = tokio::spawn(async move {
             server.init_connection().await;
