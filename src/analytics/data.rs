@@ -1,7 +1,7 @@
 use crate::analytics::requests::DataComparator;
 use crate::system::manager::SystemCapturer;
 
-use super::reports::{ReportWriter, Reportable, RunnerWriter, ServerWriter};
+use super::reports::{REPORTS_PATH, ReportWriter, Reportable, RunnerWriter, ServerWriter};
 use super::requests::{AggData, ExecAgg, ExecData, to_safe_name};
 
 use std::net::SocketAddr;
@@ -160,7 +160,6 @@ impl DataProvider for ServerReceiver {
                                     let exec_agg_clone = self.exec_agg.read().await.clone();
 
                                     if should_generate_report {
-                                        println!("Executed");
                                         let reportables: Vec<Box<dyn Reportable>> =
                                         vec![Box::new(exec_data_clone), Box::new(exec_agg_clone)];
 
@@ -233,34 +232,52 @@ impl ServerReceiver {
 }
 
 /// Handle the data from the runner's execution
+#[derive(Debug, Clone)]
 pub struct RunnerReceiver {
     pub exec_data: ExecData,
     pub diff: Option<ExecData>,
-    pub report_writer: Box<dyn ReportWriter>,
+    pub custom_path: Option<String>,
+    pub report_writer: Arc<dyn ReportWriter>,
     pub server_mode: Arc<AtomicBool>,
     pub should_close: Arc<AtomicBool>,
     pub capturing: Arc<AtomicBool>,
 }
 
 impl DataProvider for RunnerReceiver {
-    async fn main_loop(mut self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn main_loop(self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
             match listener.accept().await {
                 Ok((socket, addr)) => {
                     info!("Client connected: {}", addr);
 
-                    self.handle_client(socket, addr).await?;
-                    if self.should_generate_report() {
-                        // Calculate the difference and generate the final report
-                        if let Some(diff) = self.diff {
-                            self.diff = None;
-                            self.report_writer.generate_report(&diff, None)?;
-                            println!("Capture finished successfully, written in {}", diff.default_path());
-                        }
+                    let mut self_inner = self.clone();
 
-                        if !self.server_mode.load(Ordering::Relaxed) {
-                            break;
+                    let job = tokio::spawn(async move {
+                        self_inner.handle_client(socket, addr).await.unwrap_or_else(|e| {
+                            error!(%e, "Error handling client");
+                        });
+                        if self_inner.should_generate_report() {
+                            // Calculate the difference and generate the final report
+                            if let Some(diff) = self_inner.diff {
+                                self_inner.diff = None;
+                                self_inner
+                                    .report_writer
+                                    .generate_report(
+                                        &diff,
+                                        self_inner.custom_path.map(|n| format!("{REPORTS_PATH}/{n}")).as_deref(),
+                                    )
+                                    .unwrap_or_else(|e| {
+                                        error!(%e, "Error generating report");
+                                    });
+                                println!("Capture finished successfully, written in {}", diff.default_path());
+                            }
                         }
+                    });
+
+                    // If not is server mode, close the server, otherwise continue listening
+                    if !self.server_mode.load(Ordering::Relaxed) {
+                        job.await?;
+                        break;
                     }
                 }
                 Err(e) => {
@@ -306,9 +323,7 @@ impl DataProvider for RunnerReceiver {
                         let request = String::from_utf8_lossy(&buf);
                         let maybe_name = self.parse_app_name(&request);
 
-                        if let Some(name) = maybe_name {
-                            self.report_writer.set_report_name(name.to_owned());
-                        }
+                        self.custom_path = maybe_name.map(|n| n.to_string());
                     }
 
                     // First capture
@@ -383,8 +398,9 @@ impl RunnerReceiver {
     pub fn new(name: &str, report_writer: Box<dyn ReportWriter + 'static>) -> Self {
         Self {
             exec_data: ExecData::from_system_data(name),
-            report_writer,
+            report_writer: report_writer.into(),
             diff: None,
+            custom_path: None,
             server_mode: Arc::new(AtomicBool::new(false)),
             should_close: Arc::new(AtomicBool::new(false)),
             capturing: Arc::new(AtomicBool::new(false)),
@@ -452,8 +468,6 @@ mod tests {
             self.reports_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
-
-        fn set_report_name(&mut self, _new_name: String) {}
     }
 
     impl TestReportWriter {

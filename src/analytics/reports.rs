@@ -62,8 +62,6 @@ pub trait ReportWriter: Send + Sync + Debug {
 
         Ok(())
     }
-
-    fn set_report_name(&mut self, new_name: String);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -80,9 +78,6 @@ impl ReportWriter for ServerWriter {
 
         Ok(())
     }
-
-    // Perhaps this can accomplish something?
-    fn set_report_name(&mut self, _new_name: String) {}
 }
 
 impl ServerWriter {
@@ -105,10 +100,6 @@ impl ReportWriter for RunnerWriter {
         }
 
         Ok(())
-    }
-
-    fn set_report_name(&mut self, new_name: String) {
-        self.report_name = new_name
     }
 }
 
