@@ -2,6 +2,9 @@
 
 Skope is an ultra-fast and flexible tool designed for benchmarking any application. It provides detailed reporting and a UI for viewing differences in performance between different benchmarks.
 
+<img width="2284" height="1209" alt="image" src="https://github.com/user-attachments/assets/1de7695b-73aa-47e8-bcfe-89fc8ace7e4d" />
+
+
 ## Installation
 
 ### Build from Source
